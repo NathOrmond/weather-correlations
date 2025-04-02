@@ -1,31 +1,222 @@
 ---
 title: "MM923 Data Analytics in R - Part 1: Data Management"
-author: "Your Name"
+author: "Nathan Ormond"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 output: 
   html_document:
     toc: true
     toc_float: true
+    toc_depth: 3
     theme: united
     highlight: tango
     code_folding: show
     df_print: paged
 ---
 
+# MM923 Data Analytics in R - Part 1: Data Management
+This notebook contains code and documentation for cleaning and preparing the weather data for analysis. It addresses the first part of the assignment (20 marks).
+
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-# Load required libraries
-library(tidyverse)
-library(here)
-
-# Set paths
-raw_data_dir <- here("data", "raw")
-processed_data_dir <- here("data", "processed")
-output_dir <- here("output")
+# Set working directory to project root using relative path
+knitr::opts_knit$set(root.dir = here::here())
 ```
 
-# MM923 Data Analytics in R - Part 1: Data Management
+# Part 1: Data Management (20 marks)
 
-This notebook contains code and documentation for cleaning and preparing the weather data for analysis. It addresses the first part of the assignment (20 marks).
+This notebook implements the data cleaning and preparation steps required for Part 1 of the MM923 assessment.
+
+## Packages
+
+```{r load-packages}
+# Tidyverse for data manipulation
+library(tidyverse)  
+# Seed for reproducibility
+set.seed(123)
+```
+
+## Raw Data
+
+```{r load-data}
+load("data/raw/forecasts.RData")
+load("data/raw/cities.RData")
+head(forecasts)
+head(cities)
+```
+
+Examining the structure of the data sets: 
+
+```{r examine-structure}
+str(forecasts)
+str(cities)
+
+summary(forecasts)
+summary(cities)
+```
+
+## Cleaning Forecasts
+From assignment:
+1. Create unique variables for State and City
+2. Make each level of Measurement have its own column with measure from Response
+3. Obtain only rows with accurate observed temp
+4. Retain only information for the year 2021
+5. Calculate the average temperature of each city and store in a variable avg_temp rounded to 3 decimal places
+6. Retain only one row from each city in each state
+
+```{r clean-forecasts}
+# Step 1: Create unique variables for State and City
+forecasts_clean <- forecasts %>%
+  separate(col = `State City`, into = c("State", "City"), sep = ":")
+
+# Check the result of Step 1
+head(forecasts_clean)
+
+# Step 2: Make each Measurement have its own column
+forecasts_clean <- forecasts_clean %>%
+  pivot_wider(names_from = Measurement, values_from = Response)
+
+# Check the result of Step 2
+head(forecasts_clean)
+
+# Step 3: Obtain only rows with accurate observed temp
+forecasts_clean <- forecasts_clean %>%
+  filter(`possible error` == "none") %>%
+  filter(!is.na(`observed temp`))
+
+# Check the result of Step 3
+head(forecasts_clean)
+
+# Step 4: Retain only information for the year 2021
+forecasts_clean <- forecasts_clean %>%
+  filter(format(date, "%Y") == "2021")
+
+# Check the result of Step 4
+head(forecasts_clean)
+min(forecasts_clean$date)
+max(forecasts_clean$date)
+
+# Step 5: Calculate average temperature rounded to 3 decimal places
+forecasts_clean <- forecasts_clean %>%
+  group_by(State, City) %>%
+  summarise(avg_temp = round(mean(`observed temp`, na.rm = TRUE), 3))
+
+# Check the result of Step 5
+head(forecasts_clean)
+
+# Step 6: Retain only one row from each city in each state
+# This is already done by the group_by and summarise operations
+# But we'll explicitly check for duplicates
+duplicated_rows <- forecasts_clean %>%
+  group_by(State, City) %>%
+  filter(n() > 1)
+
+print(paste("Number of duplicated State-City combinations:", nrow(duplicated_rows)))
+```
+
+## Cleaning Cities 
+Assignment:
+1. Create a new variable called koppen which uses variable names from columns 10 to 25 as levels
+2. Store the responses in a variable called avg_annual_precip, dropping rows with missing values
+3. Combine with the tidy forecasts data retaining cities that appear in both datasets
+4. Retain only specific variables (State, City, lon, lat, koppen, elevation, distance to coast, wind, elevation change four, elevation change eight, avg_annual_precip, avg_temp)
+```{r clean-cities}
+# Step 1-2: Create koppen variable and avg_annual_precip
+cities_clean <- cities %>%
+  # Identify the Köppen climate columns (10-25)
+  pivot_longer(cols = names(cities)[10:25], 
+               names_to = "koppen", 
+               values_to = "avg_annual_precip") %>%
+  # Drop rows with missing values in avg_annual_precip
+  filter(!is.na(avg_annual_precip)) %>%
+  # Create State and City variables matching forecasts
+  rename(State = state, City = city)
+
+# Check the result of Step 1-2
+head(cities_clean)
+```
+
+## Combining Datasets
+Now we'll combine both cleaned datasets and keep only cities that appear in both.
+
+```{r combine-datasets}
+# Step 3: Combine the datasets keeping only cities in both
+weather_data <- inner_join(forecasts_clean, cities_clean, by = c("State", "City"))
+
+# Step 4: Retain only the specified variables
+weather_data <- weather_data %>%
+  select(State, City, lon, lat, koppen, elevation, `distance to coast`, 
+         wind, `elevation change four`, `elevation change eight`, 
+         avg_annual_precip, avg_temp)
+
+# Check the final dataset
+head(weather_data)
+dim(weather_data)
+```
+
+## Validating Against Reference Data
+
+```{r validate-data}
+# Load the reference data
+load("data/raw/weather.RData")
+
+# Check if our cleaned data matches the reference data
+identical(weather_data, weather)
+
+# If not identical, investigate differences
+if(!identical(weather_data, weather)) {
+  # Check column names
+  cat("Column names match:", all.equal(names(weather_data), names(weather)), "\n")
+  
+  # Check dimensions
+  cat("Dimensions match:", all.equal(dim(weather_data), dim(weather)), "\n")
+  
+  # If dimensions don't match, investigate which cities might be missing
+  if(!identical(dim(weather_data), dim(weather))) {
+    # Check difference in rows
+    cat("Number of rows in our data:", nrow(weather_data), "\n")
+    cat("Number of rows in reference data:", nrow(weather), "\n")
+    
+    # Compare city sets
+    our_cities <- paste(weather_data$State, weather_data$City, sep="-")
+    ref_cities <- paste(weather$State, weather$City, sep="-")
+    
+    cat("Cities in reference but not in our data:", "\n")
+    print(setdiff(ref_cities, our_cities))
+    
+    cat("Cities in our data but not in reference:", "\n")
+    print(setdiff(our_cities, ref_cities))
+  }
+  
+  # Check a sample of values to see if there are numeric differences
+  cat("First 5 rows of our data:", "\n")
+  print(head(weather_data, 5))
+  
+  cat("First 5 rows of reference data:", "\n")
+  print(head(weather, 5))
+}
+```
+
+## Saving Clean Data
+```{r save-data}
+# Save the cleaned data
+saveRDS(weather_data, "data/processed/weather_clean.rds")
+
+# Also save as RData for consistency with the original format
+weather <- weather_data  # Create an object with the expected name
+save(weather, file = "data/processed/weather.RData")
+```
+
+## Summary
+
+Completed
+1. [x] Loaded the raw forecasts and cities data
+2. [ ] Cleaned the forecasts data according to specifications
+3. [ ] Cleaned the cities data according to specifications
+4. [ ] Combined the datasets and retained only necessary variables
+5. [ ] Validated our cleaned data against the reference data
+6. [ ] Saved the cleaned data for use in subsequent analyses
+
+The resulting dataset contains weather information for US cities, including average temperature, geographical information, and climate classifications.
 
 
