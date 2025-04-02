@@ -1,0 +1,31 @@
+---
+title: "MM923 Data Analytics in R - Part 3: Building a Model"
+author: "Your Name"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: united
+    highlight: tango
+    code_folding: show
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+# Load required libraries
+library(tidyverse)
+library(here)
+
+# Set paths
+raw_data_dir <- here("data", "raw")
+processed_data_dir <- here("data", "processed")
+output_dir <- here("output")
+```
+
+# MM923 Data Analytics in R - Part 3: Building a Model
+
+This notebook contains code and documentation for building and validating regression models for the weather data. It addresses the third part of the assignment (25 marks).
+
+
