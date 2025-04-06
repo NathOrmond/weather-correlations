@@ -1,5 +1,47 @@
 # Weather Analysis Functions
 
+save_visualisations <- function(plots, base_dir = "outputs", prefix = "", width = 10, height = 8, dpi = 300) {
+  dir.create(here::here(base_dir), showWarnings = FALSE)
+  if (!is.list(plots)) {
+    plots <- list(plots)
+  }
+  for (plot_name in names(plots)) {
+    filename <- file.path(base_dir, paste0(prefix, "_", plot_name, ".png"))
+    w <- if (!is.null(attr(plots[[plot_name]], "width"))) attr(plots[[plot_name]], "width") else width
+    h <- if (!is.null(attr(plots[[plot_name]], "height"))) attr(plots[[plot_name]], "height") else height
+    d <- if (!is.null(attr(plots[[plot_name]], "dpi"))) attr(plots[[plot_name]], "dpi") else dpi
+    
+    png(filename = here::here(filename), width = w, height = h, units = "in", res = d)
+    
+    tryCatch({
+      if (inherits(plots[[plot_name]], "ggplot")) {
+        print(plots[[plot_name]])
+      } else if (inherits(plots[[plot_name]], "gtable") || 
+                inherits(plots[[plot_name]], "grob") ||
+                inherits(plots[[plot_name]], "arrangelist")) {
+        grid::grid.draw(plots[[plot_name]])
+      } else if (inherits(plots[[plot_name]], "brmsfit")) {
+        # Handle brms model objects
+        plot(plots[[plot_name]])
+      } else if (inherits(plots[[plot_name]], "bayesplot")) {
+        # Handle bayesplot objects (posterior plots)
+        print(plots[[plot_name]])
+      } else if (inherits(plots[[plot_name]], "mcmc.list") || 
+                inherits(plots[[plot_name]], "mcmc")) {
+        # Handle MCMC objects
+        plot(plots[[plot_name]])
+      } else {
+        print(plots[[plot_name]])
+      }
+    }, error = function(e) {
+      warning(sprintf("Failed to save plot %s: %s", plot_name, e$message))
+    }, finally = {
+      dev.off()
+    })
+  }
+  cat("All visualisations have been saved to the", base_dir, "directory\n")
+}
+
 interpret_correlation <- function(r, variable_name) {
   r_squared <- r^2
   var_explained <- r_squared * 100
@@ -102,53 +144,4 @@ calculate_diagnostics <- function(model, model_name) {
     RMSE = rmse,
     MAE = mae
   )
-} 
-
-data_management_plots <- list(
-  "data_quality_summary" = ggplot(weather, aes(x = avg_temp)) +
-    geom_histogram(bins = 30, fill = "steelblue") +
-    labs(title = "Distribution of Average Temperatures",
-         x = "Average Temperature (°F)",
-         y = "Count") +
-    theme_minimal(),
-  
-  "missing_data_heatmap" = weather %>%
-    is.na() %>%
-    reshape2::melt() %>%
-    ggplot(aes(x = Var2, y = Var1)) +
-    geom_tile(aes(fill = value)) +
-    labs(title = "Missing Data Heatmap") +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1)),
-  
-  "koppen_distribution" = ggplot(weather, aes(x = koppen)) +
-    geom_bar(fill = "steelblue") +
-    labs(title = "Distribution of Köppen Climate Classifications",
-         x = "Köppen Classification",
-         y = "Count") +
-    theme_minimal() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1))
-)
-
-save_visualisations(data_management_plots, prefix = "data_management")
-
-save_visualisations <- function(plots, base_dir = "outputs", prefix = "", width = 10, height = 8, dpi = 300) {
-  dir.create(here::here(base_dir), showWarnings = FALSE)
-  if (!is.list(plots)) {
-    plots <- list(plots)
-  }
-  for (plot_name in names(plots)) {
-    filename <- file.path(base_dir, paste0(prefix, "_", plot_name, ".png"))
-    w <- if (!is.null(attr(plots[[plot_name]], "width"))) attr(plots[[plot_name]], "width") else width
-    h <- if (!is.null(attr(plots[[plot_name]], "height"))) attr(plots[[plot_name]], "height") else height
-    d <- if (!is.null(attr(plots[[plot_name]], "dpi"))) attr(plots[[plot_name]], "dpi") else dpi
-    ggsave(
-      filename = here::here(filename),
-      plot = plots[[plot_name]],
-      width = w,
-      height = h,
-      dpi = d
-    )
-  }
-  cat("All visualisations have been saved to the", base_dir, "directory\n")
 }

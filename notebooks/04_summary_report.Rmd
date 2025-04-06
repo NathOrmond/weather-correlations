@@ -592,30 +592,3 @@ recommendations_table <- data.frame(
 knitr::kable(recommendations_table,
              caption = "Prioritised Recommendations for Temperature-Based Destination Selection")
 ```
-
-```{r}
-# Save summary report visualisations
-summary_plots <- list(
-  "us_coastal_inland_map" = coastal_map_usmap,
-  "florida_location_analysis" = florida_viz,
-  "ohio_location_analysis" = ohio_viz,
-  "temperature_distribution" = temp_hist,
-  "springfield_prediction" = springfield_viz,
-  "model_diagnostics" = model_diagnostics_plot
-)
-
-# Set custom dimensions for specific plots
-attr(summary_plots$us_coastal_inland_map, "width") <- 12
-attr(summary_plots$us_coastal_inland_map, "height") <- 8
-attr(summary_plots$florida_location_analysis, "width") <- 10
-attr(summary_plots$florida_location_analysis, "height") <- 8
-attr(summary_plots$ohio_location_analysis, "width") <- 10
-attr(summary_plots$ohio_location_analysis, "height") <- 8
-attr(summary_plots$springfield_prediction, "width") <- 8
-attr(summary_plots$springfield_prediction, "height") <- 6
-attr(summary_plots$model_diagnostics, "width") <- 12
-attr(summary_plots$model_diagnostics, "height") <- 4
-
-# Save the plots
-save_visualisations(summary_plots, prefix = "summary")
-```

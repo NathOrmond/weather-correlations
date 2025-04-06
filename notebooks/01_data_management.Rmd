@@ -53,7 +53,7 @@ head(cities)
 
 ### Forecasts
 
-```{r examine-structure}
+```{r examine-structure-forecasts}
 str(forecasts)
 ```
 We can see that the `forecasts` dataset has the following columns:
@@ -65,7 +65,7 @@ We can see that the `forecasts` dataset has the following columns:
 - `Response`: The measured value
 
 
-```{r examine-structure}
+```{r examine-structure-cities}
 str(cities)
 ```
 
@@ -76,11 +76,11 @@ The `cities` dataset contains geographical and climate information for cities, i
 - Climate classifications (columns 10-25, various [Köppen climate types](https://en.wikipedia.org/wiki/K%C3%B6ppen_climate_classification))
 
 
-```{r examine-structure}
+```{r examine-summary-forecasts}
 summary(forecasts)
 ```
 
-```{r examine-structure}
+```{r examine-summary-cities}
 summary(cities)
 ```
 
@@ -183,15 +183,14 @@ print(paste("Number of duplicated State-City combinations:", nrow(duplicated_row
 #### Processing Köppen Climate Data in Our Dataset
 In our `cities` dataset, the Köppen climate types are represented as individual columns (positions 10-25), with each column name corresponding to a specific climate type (e.g., 'Cfa', 'BSk', 'Dfa'). The values in these columns represent the average annual precipitation for cities with that climate type.
 
-```{r cities-step1-2}
+```{r koppen-types}
 # Peeping Köppen climate types 
 koppen_columns <- names(cities)[10:25]
 cat("Köppen climate types in our dataset:", "\n")
 print(koppen_columns)
 ```
 
-
-```{r cities-step1-2}
+```{r koppen-data-creation}
 # Create koppen variable 
 # climate types as levels 
 # avg_annual_precip values
@@ -206,8 +205,7 @@ cities_clean <- cities %>%
 head(cities_clean)
 ```
 
-
-```{r cities-step1-2}
+```{r koppen-distribution}
 koppen_distribution <- cities_clean %>%
   count(koppen) %>%
   arrange(desc(n))
@@ -217,7 +215,7 @@ print(koppen_distribution)
 
 - Create a data frame with specific explanations for the Köppen types in our dataset
 - Why? Sometimes it's nice to make things understandable
-```{r cities-step1-2}
+```{r koppen-reference}
 koppen_reference <- tribble(
   ~koppen, ~main_group, ~description,
   "Af", "A", "Tropical rainforest - No dry season",
@@ -241,7 +239,7 @@ print(koppen_reference)
 ```
 
 - Joint with distribution data
-```{r cities-step1-2}
+```{r koppen-summary}
 koppen_summary <- koppen_distribution %>%
   left_join(koppen_reference, by = "koppen") %>%
   arrange(main_group, koppen)
@@ -252,7 +250,7 @@ print(koppen_summary)
 - For analysis in Part 2 of the assignment, we need to identify cities with a Köppen climate classification starting with 'A 
 - Add the main climate group to data in cleaning/prep phase
 
-```{r cities-step1-2}
+```{r climate-group-addition}
 cities_clean <- cities_clean %>%
   mutate(climate_group = substr(koppen, 1, 1))
 
@@ -261,7 +259,7 @@ head(cities_clean)
 - So we can see `climate_group` column added
 - Class 'A': According to the Köppen system, these cities have a temperature of the coolest month of 18°C or higher
 
-```{r cities-step1-2}
+```{r koppen-group-a}
 # Print only climate group 'A' from the koppen summary
 koppen_summary %>% 
   filter(main_group == "A") %>%
@@ -269,11 +267,10 @@ koppen_summary %>%
 ```
 
 - Count cities are in each main climate group
-```{r cities-step1-2}
+```{r climate-group-count}
 cities_clean %>%
   count(climate_group) %>%
   arrange(climate_group)
-
 ```
 
 
@@ -287,7 +284,7 @@ cities_clean %>%
 
 ### Step 2: Prepare Cities Data for Joining
 
-```{r cities-step2}
+```{r cities-column-rename}
 # Standardise column names to match with forecasts data
 cities_clean <- cities_clean %>%
   rename(State = state, City = city)
@@ -318,7 +315,7 @@ $A \cap B = \{ x \mid x \in A \land x \in B \land x \text{ satisfies the join co
   - City (uppercase C)
   
   
-```{r cities-step2}
+```{r cities-column-check}
 cat("Column names in forecasts_clean:", "\n")
 print(names(forecasts_clean))
 cat("\nColumn names in cities_clean:", "\n")
@@ -386,7 +383,7 @@ print("Cleaning complete")
 
 ```{r combine-step3}
 weather_data <- inner_join(forecasts_clean, cities_clean, by = c("State", "City")) %>%
-  select(State, City, lon, lat, koppen, elevation, distance_to_coast, 
+  dplyr::select(State, City, lon, lat, koppen, elevation, distance_to_coast, 
          wind, elevation_change_four, elevation_change_eight, 
          avg_annual_precip, avg_temp) %>%
   arrange(State, City)  # Sort just like the reference dataset might be sorted
@@ -395,12 +392,12 @@ print("Clean weather_data produced")
 
 ### Step 4: Validate cleaned data
 
-```{r combine-step3}
-cat("Cleaned processed dataset dimensions:", dim(weather_data)[1], "rows by", dim(weather_data)[2], "columns\n")
-cat("Original dataset dimensions:", dim(weather)[1], "rows by", dim(weather)[2], "columns\n")
+```{r combine-step3-validate}
+# Check that the data loaded correctly
+cat("Dataset dimensions:", dim(weather)[1], "rows by", dim(weather)[2], "columns\n")
 ```
 
-```{r combine-step3}
+```{r combine-step3-unique}
 # Count unique State-City combinations in both datasets
 cat("Unique State-City combinations in cleaned dataset:", 
     weather_data %>% distinct(State, City) %>% nrow(), "\n")
@@ -408,7 +405,7 @@ cat("Unique State-City combinations in original dataset:",
     weather %>% distinct(State, City) %>% nrow(), "\n")
 ```
 
-```{r combine-step3}
+```{r combine-step3-columns}
 required_cols <- c("State", "City", "lon", "lat", "koppen", "elevation", 
                   "distance_to_coast", "wind", "elevation_change_four", 
                   "elevation_change_eight", "avg_annual_precip", "avg_temp")
@@ -420,12 +417,11 @@ cat("Missing required columns in cleaned dataset:",
 extra_cols <- setdiff(names(weather_data), required_cols)
 cat("Extra columns in cleaned dataset:", 
     ifelse(length(extra_cols) == 0, "None", paste(extra_cols, collapse=", ")), "\n")
-
 ```
 
-- Check if the city and state combinations match betwen the unprocessed and clean data
-- 0 differences is GOOD
-```{r combine-step3}
+```{r combine-step3-combos}
+# Check if the city and state combinations match betwen the unprocessed and clean data
+# 0 differences is GOOD
 origin_combos <- paste(weather$State, weather$City, sep="-")
 cleaned_combos <- paste(weather_data$State, weather_data$City, sep="-")
 raw_unique <- setdiff(origin_combos, cleaned_combos)
@@ -437,8 +433,8 @@ print(length(raw_unique))
 print(head(cleaned_unique))
 ```
 
-- Peep values -- Integrity check (i.e. verify nothing super weird like 0xFF or 1.8683 (which would be super sus for what we expect))
-```{r combine-step3}
+```{r combine-step3-values}
+# Peep values -- Integrity check
 cat("\nFirst few entries in State column:\n")
 head(cities_clean$State)
 
@@ -446,8 +442,8 @@ cat("\nFirst few entries in City column:\n")
 head(cities_clean$City)
 ```
 
-- Check for dirty data
-```{r combine-step3}
+```{r combine-step3-na}
+# Check for dirty data
 na_count <- weather_data %>% 
   summarise(across(everything(), ~sum(is.na(.)))) %>%
   pivot_longer(everything(), names_to = "Column", values_to = "NA_Count") %>%
@@ -465,7 +461,8 @@ if(nrow(na_count) > 0) {
 ## Persisting Cleaned Data 
 - Save cleaned data for future use
 - Create a processed data dir if not exists
-```{r save-data}
+```{r save-data-dir}
+# Create processed data dir if not exists
 if(!dir.exists("data/processed")) {
   dir.create("data/processed", recursive = TRUE)
 }
@@ -475,12 +472,12 @@ if(!dir.exists("data/processed")) {
 - Stores a single R object (unlike .RData which can store multiple objects)
 - Preserves the object's structure, classes, and attributes
 - Creates more compact files than some other formats
-```{r save-data}
+```{r save-data-rds}
 saveRDS(weather_data, "data/processed/weather_clean.rds")
 ```
 
 - Also save as RData for consistency with the original format
-```{r save-data}
+```{r save-data-rdata}
 weather <- weather_data 
 save(weather, file = "data/processed/weather.RData")
 print("Saved cleaned data to data/processed/weather_clean.rds and data/processed/weather.RData\n")
@@ -511,6 +508,7 @@ print("Saved cleaned data to data/processed/weather_clean.rds and data/processed
 
 > The resulting dataset contains weather information for US cities, including average temperature, geographical information, and climate classifications, ready for exploration in Part 2.
 
+```{r save-vis}
 # Save data management visualisations
 data_management_plots <- list(
   "data_quality_summary" = ggplot(weather, aes(x = avg_temp)) +
