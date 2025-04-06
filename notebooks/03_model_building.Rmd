@@ -1,6 +1,6 @@
 ---
-title: "MM923 Data Analytics in R - Part 3: Building a Model"
-author: "Your Name"
+title: "MM923 Data Analytics in R - Part 3: Building Your model"
+author: "Nathan Ormond"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 output: 
   html_document:
@@ -10,22 +10,897 @@ output:
     highlight: tango
     code_folding: show
     df_print: paged
+editor_options: 
+  markdown: 
+    wrap: 72
 ---
-
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-# Load required libraries
-library(tidyverse)
-library(here)
-
-# Set paths
-raw_data_dir <- here("data", "raw")
-processed_data_dir <- here("data", "processed")
-output_dir <- here("output")
-```
 
 # MM923 Data Analytics in R - Part 3: Building a Model
 
-This notebook contains code and documentation for building and validating regression models for the weather data. It addresses the third part of the assignment (25 marks).
+This notebook contains code and documentation for building and
+validating regression models for the weather data. It addresses the
+third part of the assignment (25 marks).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+# Set working directory to project root using relative path
+knitr::opts_knit$set(root.dir = here::here())
+source(here::here("R", "functions.R"))
+```
+
+## Load Packages and Data
+
+```{r load-packages-data}
+# Load required libraries
+library(tidyverse)
+library(ggplot2)
+library(here)
+library(moments)
+library(gridExtra) 
+library(dplyr)
+library(ggplot2)
+library(brms)
+library(tidybayes)
+library(bayesplot) 
+library(sn)
+library(lmtest)
+library(car)
+library(MASS)
+```
+
+-   get util functions
+
+```{r load-packages-data}
+source(here::here("R", "functions.R"))
+```
+
+```{r load-packages-data}
+# Set paths
+processed_data_dir <- here("data", "processed")
+if(file.exists(file.path(processed_data_dir, "weather.RData"))) {
+  load(file.path(processed_data_dir, "weather.RData"))
+  cat("Loaded CLEANED weather data from weather.RData\n")
+} else if(file.exists(file.path(processed_data_dir, "weather_clean.rds"))) {
+  weather <- readRDS(file.path(processed_data_dir, "weather_clean.rds"))
+  cat("Loaded CLEANED weather data from weather_clean.rds\n")
+} else {
+  cat("PROBLEM LOADING CLEANED DATA\n")
+  cat("Please make sure that you ran the data cleaning tasks in 01_data_management.Rmd\n")
+}
+```
+
+-   Check data (expect same dims as in cleaning steps)
+
+```{r load-packages-data}
+# Check that the data loaded correctly
+cat("Dataset dimensions:", dim(weather)[1], "rows by", dim(weather)[2], "columns\n")
+```
+
+## (a) Use one of the lon or lat variables and all of the elevation, wind, avg annual precip, elevation change four, elevation change eight, and distance to coast variables to model the average temperature of US cities. Choose the variable more suitable to be a predictor between longitude and latitude based on your findings in (Part 2b) and fit a linear regression model.
+
+```{r q-a}
+# Create histogram with density overlay
+ggplot(weather, aes(x = avg_temp)) +
+  geom_histogram(aes(y = ..density..), 
+                 binwidth = 2, 
+                 fill = "steelblue", 
+                 color = "white", 
+                 alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  geom_vline(xintercept = c(temp_summary$mean, temp_summary$median),
+             color = c("red", "blue"),
+             linetype = "dashed") +
+  labs(
+    title = "Distribution of Average Temperatures Across US Cities",
+    subtitle = "Red line = Mean, Blue line = Median",
+    x = "Average Temperature (°F)",
+    y = "Density"
+  ) +
+  theme_minimal()
+
+```
+
+```{r q-a}
+# Create a summary table of key measures
+location_spread_summary <- data.frame(
+  Measure = c("Mean", "Median", "Mode", "Q1", "Q3", "IQR", "SD", "Range"),
+  Value = c(
+    temp_summary$mean,
+    temp_summary$median,
+    # Calculate mode
+    as.numeric(names(sort(table(weather$avg_temp), decreasing = TRUE)[1])),
+    temp_summary$q1,
+    temp_summary$q3,
+    temp_summary$iqr,
+    temp_summary$sd,
+    temp_summary$range
+  )
+)
+
+# Format the table
+knitr::kable(location_spread_summary, 
+             caption = "Measures of Location and Spread for Average Temperature",
+             digits = 2)
+```
+
+```{r q-a}
+cat(sprintf("- Mean (%.2f°F)\n", temp_summary$mean))
+cat(sprintf("- Median (%.2f°F)\n",temp_summary$median))
+cat(sprintf("- Skew (%.3f)\n", temp_summary$skewness))
+cat(sprintf("- Standard Deviation: %.2f°\n", temp_summary$sd))
+cat(sprintf("- IQR: %.2f°F\n", temp_summary$iqr))
+cat(sprintf("- Range: %.2f°F to %.2f°F\n", temp_summary$min, temp_summary$max))
+```
+
+### Interpretation of Temperature Distribution
+
+1.  Central Tendency:
+
+-   Mean (50.77°F) and Median (49.68°F) are close, suggesting a roughly
+    symmetric distribution
+-   The small positive skewness (0.122) indicates a slight right skew
+
+2.  Spread:
+
+-   Standard Deviation: 8.95°F indicates moderate variability
+-   IQR: 11.05°F shows the range of the middle 50% of temperatures
+-   Range: 23.40°F to 75.91°F shows the full temperature spectrum
+
+3.  Distribution Shape:
+
+-   Coefficient of Variation: 17.62% suggests moderate relative
+    variability
+-   The distribution appears approximately normal with slight right skew
+-   The density curve (red) follows the histogram shape closely
+
+```{r q-a}
+
+```
+
+## (a)(i) Provide a formatted ANOVA table for the model and carry out an F-test.
+
+-   Build the linear regression model with latitude and required
+    variables
+-   Generate a summary of the model
+
+```{r q-ai}
+model_a <- lm(avg_temp ~ lat + elevation + wind + avg_annual_precip + 
+              elevation_change_four + elevation_change_eight + distance_to_coast, 
+              data = weather)
 
 
+model_a_summary <- summary(model_a)
+print(model_a_summary)
+```
+
+-   Create a formatted ANOVA table
+
+```{r q-ai}
+model_a_anova <- anova(model_a)
+print(model_a_anova)
+```
+
+-   Pretty print with kable for better presentation
+
+```{r q-ai}
+knitr::kable(model_a_anova, 
+             caption = "ANOVA Table for Model with Latitude and Geographical Variables",
+             digits = 3)
+```
+
+-   Interpret the F-test from the model summary
+-   Extract and format the F-test information from the model summary
+-   Calculate the p-value explicitly using the F distribution
+-   Format the p-value with proper scientific notation if it's very
+    small
+
+```{r q-ai}
+# Print F-test information
+cat("F-test for overall model significance:\n")
+cat("F-statistic:", round(model_a_summary$fstatistic[1], 3), 
+    "on", model_a_summary$fstatistic[2], "and", model_a_summary$fstatistic[3], "DF\n")
+
+# Calculate and format p-value
+p_value <- pf(model_a_summary$fstatistic[1], 
+              model_a_summary$fstatistic[2], 
+              model_a_summary$fstatistic[3], 
+              lower.tail = FALSE)
+if (p_value < 0.001) {
+  p_value_formatted <- "< 0.001"
+} else {
+  p_value_formatted <- sprintf("%.3f", p_value)
+}
+cat("p-value:", p_value_formatted, "\n\n")
+```
+
+-   Util function to evaluate and report model significance
+
+```{r q-ai}
+# My sense of humour is not a result of being neurotypical :) 
+f_test_data_dredger <- function(model_summary, alpha) {
+  # Calculate p-value from F-statistic
+  p_value <- pf(model_summary$fstatistic[1], 
+                model_summary$fstatistic[2], 
+                model_summary$fstatistic[3], 
+                lower.tail = FALSE)
+  if (p_value < alpha) {
+    result <- paste("The overall model is statistically significant at the", alpha, "level.")
+    result <- paste(result, "We reject the null hypothesis that all coefficients equal zero.")
+  } else {
+    result <- paste("The overall model is not statistically significant at the", alpha, "level.")
+    result <- paste(result, "We fail to reject the null hypothesis that all coefficients equal zero.")
+  }
+  return(result)
+}
+```
+
+-   Determine if the model is statistically significant at alpha 0.05
+
+```{r q-ai}
+alpha_05 <- 0.05
+cat("Testing at alpha =", alpha_05, ":\n")
+cat(f_test_data_dredger(model_a_summary, alpha_05), "\n\n")
+```
+
+-   Determine if the model is statistically significant at alpha 0.01
+
+```{r q-ai}
+alpha_01 <- 0.01
+cat("Testing at alpha =", alpha_01, ":\n")
+cat(f_test_data_dredger(model_a_summary, alpha_01), "\n")
+```
+
+-   Interpretation of individual predictors in the ANOVA table
+-   Extract R-squared values and create a formatted summary
+
+```{r  ai}
+r_squared <- model_a_summary$r.squared
+adj_r_squared <- model_a_summary$adj.r.squared
+cat("Model Fit Statistics:\n")
+cat("R-squared:", round(r_squared, 3), 
+    "(", round(r_squared * 100, 1), "% of variance explained)\n")
+cat("Adjusted R-squared:", round(adj_r_squared, 3), "\n\n")
+```
+
+-   Create a table of significant predictors based on the ANOVA results
+
+```{r  ai}
+predictor_significance <- data.frame(
+  Predictor = rownames(model_a_anova),
+  F_value = model_a_anova$`F value`,
+  P_value = model_a_anova$`Pr(>F)`,
+  Significant = model_a_anova$`Pr(>F)` < 0.05
+)
+predictor_significance <- predictor_significance[-nrow(predictor_significance),] # Remove residuals row
+knitr::kable(predictor_significance, 
+             caption = "Significance of Individual Predictors",
+             digits = 3)
+```
+
+-   Visualise the relative contribution of each predictor
+
+```{r  ai}
+ggplot(data = data.frame(
+  Predictor = rownames(model_a_anova)[-length(rownames(model_a_anova))],
+  SumOfSquares = model_a_anova$`Sum Sq`[-length(model_a_anova$`Sum Sq`)]
+)) +
+  geom_bar(aes(x = reorder(Predictor, SumOfSquares), y = SumOfSquares), 
+           stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Contribution of Predictors to Explaining Temperature Variance",
+    x = "Predictor",
+    y = "Sum of Squares"
+  ) +
+  theme_minimal()
+```
+
+-   Display the model equation with coefficients
+
+```{r  ai}
+coef_table <- data.frame(
+  Coefficient = names(coef(model_a)),
+  Estimate = coef(model_a),
+  stringsAsFactors = FALSE
+)
+coef_table$Coefficient <- gsub("\\(Intercept\\)", "Intercept", coef_table$Coefficient)
+
+# Create model equation
+equation_terms <- paste(
+  round(coef_table$Estimate[1], 2),
+  paste(
+    sapply(2:nrow(coef_table), function(i) {
+      paste0(
+        ifelse(coef_table$Estimate[i] >= 0, " + ", " - "), 
+        abs(round(coef_table$Estimate[i], 2)), 
+        " × ", 
+        coef_table$Coefficient[i]
+      )
+    }),
+    collapse = ""
+  )
+)
+cat("Model Equation:\n")
+cat("avg_temp =", equation_terms, "\n\n")
+
+```
+
+-   Interpret the key findings from the ANOVA analysis
+
+```{r  ai}
+significant_predictors <- predictor_significance[predictor_significance$Significant, "Predictor"]
+cat("Key Findings from ANOVA Analysis:\n")
+cat("1. Overall model significance: The model is statistically significant ")
+cat("(F = ", round(model_a_summary$fstatistic[1], 2), ", p ", p_value_formatted, ")\n", sep = "")
+cat("2. The model explains ", round(r_squared * 100, 1)) 
+cat("% of the variance in average temperature (R² = ", round(r_squared, 3), ")\n", sep = "")
+cat("3. Significant predictors: ")
+if(length(significant_predictors) > 0) {
+  cat(paste(significant_predictors, collapse = ", "))
+} else {
+  cat("None of the predictors are individually significant")
+}
+cat("\n")
+cat("4. Biggest predictors:\n")
+top_predictors <- rownames(model_a_anova)[order(model_a_anova$`Sum Sq`, decreasing = TRUE)]
+top_predictors <- top_predictors[top_predictors != "Residuals"][1:3]
+for(i in seq_along(top_predictors)) {
+  cat("   ", i, ". ", top_predictors[i], "\n", sep = "")
+}
+```
+
+Key Findings from ANOVA Analysis: 1. Overall model significance: The
+model is statistically significant (F = 187.93, p \< 0.001) 2. The model
+explains 89.3 % of the variance in average temperature (R² = 0.893 ) 3.
+Significant predictors: lat, elevation, wind, avg_annual_precip,
+distance_to_coast 4. Based on the Sum of Squares, the predictors with
+the largest contribution are: 1. lat 2. elevation
+
+-   Provide additional context on effect direction
+
+```{r  ai}
+# Add interpretation of coefficient direction
+cat("\nEffect Direction of Significant Predictors:\n")
+for(pred in significant_predictors) {
+  coef_value <- coef(model_a)[pred]
+  direction <- ifelse(coef_value > 0, "positive", "negative")
+  cat("- ", pred, ": ", direction, " effect (", round(coef_value, 3), 
+      ") - as ", pred, " increases, temperature ", 
+      ifelse(coef_value > 0, "increases", "decreases"), "\n", sep = "")
+}
+```
+
+\## (a)(ii) Test whether the slope coefficient of the distance to coast
+is equal to -0.01.
+
+-   Extract coefficient and standard error for distance_to_coast\
+
+```{r q-aii}
+coast_coef <- coef(model_a)["distance_to_coast"]
+coast_se <- sqrt(diag(vcov(model_a)))["distance_to_coast"]
+h0_value <- -0.01
+t_stat <- (coast_coef - h0_value) / coast_se
+df <- df.residual(model_a)
+p_value <- 2 * pt(abs(t_stat), df, lower.tail = FALSE)
+
+# Create a hypothesis test results table
+test_results <- data.frame(
+  Parameter = "distance_to_coast",
+  Coefficient = coast_coef,
+  SE = coast_se,
+  Hypothesised_Value = h0_value,
+  t_statistic = t_stat,
+  df = df,
+  p_value = p_value,
+  Conclusion = ifelse(p_value < 0.05, 
+                      "Reject H₀", 
+                      "Fail to reject H₀")
+)
+
+# Print formatted results
+knitr::kable(test_results, 
+             caption = "Hypothesis Test for distance_to_coast coefficient = -0.01",
+             digits = 5)
+```
+
+The coefficient for distance_to_coast (-0.00318) is significantly
+different from -0.01 (p-value = \< 0.001).
+
+We reject the null hypothesis that the coefficient equals -0.01.
+
+The actual coefficient is significantly less negative than -0.01,
+indicating a weaker effect of distance to coast on temperature than
+hypothesised.
+
+```{r q-aii}
+if (p_value < 0.05) {
+  cat("The coefficient for distance_to_coast (", round(coast_coef, 5), 
+      ") is significantly different from -0.01 (p-value = ", 
+      ifelse(p_value < 0.001, "< 0.001", round(p_value, 5)), ").\n\n", sep = "")
+  cat("We reject the null hypothesis that the coefficient equals -0.01.\n\n")
+  if (coast_coef < -0.01) {
+    cat("The actual coefficient is significantly more negative than -0.01, ", 
+        "indicating a stronger effect of distance to coast on temperature ", 
+        "than hypothesised.\n", sep = "")
+  } else {
+    cat("The actual coefficient is significantly less negative than -0.01, ", 
+        "indicating a weaker effect of distance to coast on temperature ", 
+        "than hypothesised.\n", sep = "")
+  }
+} else {
+  cat("The coefficient for distance_to_coast (", round(coast_coef, 5), 
+      ") is not significantly different from -0.01 (p-value = ", 
+      round(p_value, 5), ").\n\n", sep = "")
+  cat("We fail to reject the null hypothesis that the coefficient equals -0.01.\n\n")
+  cat("The data are consistent with the slope coefficient of distance_to_coast ", 
+      "being equal to -0.01, meaning for each additional mile from the coast, ", 
+      "the average temperature decreases by approximately 0.01°F, ", 
+      "holding all other predictors constant.\n", sep = "")
+}
+```
+
+## (b) Use automatic variable selection methods to explore building an improved version of the model from part a).
+
+```{r q-b}
+full_model <- lm(avg_temp ~ lat + elevation + wind + avg_annual_precip + 
+                elevation_change_four + elevation_change_eight + distance_to_coast, 
+                data = weather)
+null_model <- lm(avg_temp ~ 1, data = weather)
+forward_model <- step(null_model, 
+                     scope = list(lower = null_model, upper = full_model), 
+                     direction = "forward", 
+                     trace = 0)  # trace = 0 suppresses intermediate output
+backward_model <- step(full_model, 
+                      direction = "backward", 
+                      trace = 0)
+both_model <- step(null_model, 
+                  scope = list(lower = null_model, upper = full_model), 
+                  direction = "both", 
+                  trace = 0)
+model_info <- function(model, name) {
+  data.frame(
+    Model = name,
+    Variables = paste(names(coef(model))[-1], collapse = ", "), # Exclude intercept
+    R_squared = summary(model)$r.squared,
+    Adj_R_squared = summary(model)$adj.r.squared,
+    AIC = AIC(model),
+    BIC = BIC(model)
+  )
+}
+models_comparison <- rbind(
+  model_info(model_a, "Original (Full)"),
+  model_info(forward_model, "Forward Selection"),
+  model_info(backward_model, "Backward Selection"),
+  model_info(both_model, "Bidirectional Selection")
+)
+
+# Print model comparison
+knitr::kable(models_comparison, 
+             caption = "Comparison of Original and Automated Selection Models",
+             digits = 4)
+```
+
+```{r q-b}
+best_adj_r2_model <- models_comparison$Model[which.max(models_comparison$Adj_R_squared)]
+cat("Best model based on Adjusted R-squared:", best_adj_r2_model, "\n")
+```
+
+```{r q-b}
+if (best_adj_r2_model == "Original (Full)") {
+  best_model <- model_a
+} else if (best_adj_r2_model == "Forward Selection") {
+  best_model <- forward_model
+} else if (best_adj_r2_model == "Backward Selection") {
+  best_model <- backward_model
+} else {
+  best_model <- both_model
+}
+summary(best_model)
+```
+
+## (c) Compare the models from part b) and part a). Comment on any improvements in the model fit or predictive ability. Select the best model to use for predictions.
+
+```{r q-c}
+cv_rmse <- function(model, data, k = 5) {
+  set.seed(123)  # For reproducibility
+  folds <- cut(seq(1, nrow(data)), breaks = k, labels = FALSE)
+  cv_errors <- numeric(k)
+  for (i in 1:k) {
+    test_indices <- which(folds == i)
+    train_data <- data[-test_indices, ]
+    test_data <- data[test_indices, ]
+    model_formula <- formula(model)
+    train_model <- lm(model_formula, data = train_data)
+    predictions <- predict(train_model, newdata = test_data)
+    cv_errors[i] <- sqrt(mean((test_data$avg_temp - predictions)^2))
+  }
+  return(mean(cv_errors))
+}
+
+cv_results <- data.frame(
+  Model = c("Original (Full)", "Forward Selection", "Backward Selection", "Bidirectional Selection"),
+  CV_RMSE = c(
+    cv_rmse(model_a, weather),
+    cv_rmse(forward_model, weather),
+    cv_rmse(backward_model, weather),
+    cv_rmse(both_model, weather)
+  )
+)
+
+cv_results$In_Sample_RMSE <- c(
+  sqrt(mean(model_a$residuals^2)),
+  sqrt(mean(forward_model$residuals^2)),
+  sqrt(mean(backward_model$residuals^2)),
+  sqrt(mean(both_model$residuals^2))
+)
+
+cv_results$Num_Predictors <- c(
+  length(coef(model_a)) - 1,  # Subtract 1 for intercept
+  length(coef(forward_model)) - 1,
+  length(coef(backward_model)) - 1,
+  length(coef(both_model)) - 1
+)
+
+cv_results$Adj_R_Squared <- c(
+  summary(model_a)$adj.r.squared,
+  summary(forward_model)$adj.r.squared,
+  summary(backward_model)$adj.r.squared,
+  summary(both_model)$adj.r.squared
+)
+
+knitr::kable(cv_results, digits = 4,
+             caption = "Model Comparison with Cross-Validation Performance")
+```
+
+```{r q-c}
+best_cv_model <- cv_results$Model[which.min(cv_results$CV_RMSE)]
+cat("Based on cross-validation RMSE, the best model is:", best_cv_model, "\n")
+```
+
+-   If there's a simpler model with similar performance, prefer it
+
+```{r q-c}
+best_models <- cv_results[cv_results$CV_RMSE <= min(cv_results$CV_RMSE) * 1.01, ]
+if (nrow(best_models) > 1) {
+  best_model_name <- best_models$Model[which.min(best_models$Num_Predictors)]
+  cat("Considering parsimony, the best model is:", best_model_name, 
+      "with", best_models$Num_Predictors[best_models$Model == best_model_name], 
+      "predictors and CV RMSE of", round(best_models$CV_RMSE[best_models$Model == best_model_name], 4), "\n")
+} else {
+  best_model_name <- best_cv_model
+}
+if (best_model_name == "Original (Full)") {
+  final_model <- model_a
+} else if (best_model_name == "Forward Selection") {
+  final_model <- forward_model
+} else if (best_model_name == "Backward Selection") {
+  final_model <- backward_model
+} else {
+  final_model <- both_model
+}
+
+model_coef <- coef(final_model)
+model_eq <- paste0("avg_temp = ", round(model_coef[1], 3))
+for (i in 2:length(model_coef)) {
+  term <- names(model_coef)[i]
+  coef_val <- model_coef[i]
+  if (coef_val >= 0) {
+    model_eq <- paste0(model_eq, " + ", round(coef_val, 3), " × ", term)
+  } else {
+    model_eq <- paste0(model_eq, " - ", abs(round(coef_val, 3)), " × ", term)
+  }
+}
+
+cat("\nFinal Model Equation:\n", model_eq, "\n")
+```
+
+## (d) Using your chosen model from part c), check the regression assumptions using appropriate summary plots, and comment on whether you think they are valid.
+
+-   Test for normality of residuals using Shapiro-Wilk tes
+
+```{r q-d}
+par(mfrow = c(2, 2))
+plot(final_model)
+par(mfrow = c(1, 1))
+
+sw_test <- shapiro.test(residuals(final_model))
+```
+
+```{r q-d}
+# Fix the Shapiro-Wilk test p-value formatting
+cat("Shapiro-Wilk test for normality:\n")
+cat("W =", round(sw_test$statistic, 4), "p-value =", 
+    ifelse(sw_test$p.value < 0.001, "< 0.001", round(sw_test$p.value, 4)), "\n")
+cat("Conclusion:", ifelse(sw_test$p.value < 0.05, 
+                        "Residuals are not normally distributed",
+                        "Residuals appear to be normally distributed"), "\n\n")
+
+```
+
+-   Test for homoscedasticity using Breusch-Pagan test
+
+```{r q-d}
+bp_test <- bptest(final_model)
+cat("Breusch-Pagan test for homoscedasticity:\n")
+cat("BP =", round(bp_test$statistic, 4), "p-value =", round(bp_test$p.value, 4), "\n")
+cat("Conclusion:", ifelse(bp_test$p.value < 0.05, 
+                         "Heteroscedasticity is present",
+                         "Homoscedasticity assumption appears valid"), "\n\n")
+
+
+vif_values <- vif(final_model)
+cat("Variance Inflation Factors (VIF):\n")
+print(vif_values)
+cat("Values > 5 indicate problematic multicollinearity\n\n")
+```
+
+-   Check for influential observations
+
+```{r q-d}
+influential_obs <- which(cooks.distance(final_model) > 4/length(cooks.distance(final_model)))
+if (length(influential_obs) > 0) {
+  cat("Potentially influential observations (based on Cook's distance):\n")
+  print(influential_obs)
+} else {
+  cat("No highly influential observations detected\n")
+}
+```
+
+-   Summary of assumptions
+
+```{r q-d}
+cat("1. Linearity: ", 
+    ifelse(cor.test(fitted(final_model), residuals(final_model))$p.value < 0.05, 
+           "Potential non-linearity issues", 
+           "Assumption appears reasonable"), "\n")
+```
+
+```{r q-d}
+cat("2. Independence: Not formally tested\n")
+```
+
+```{r q-d}
+cat("3. Normality: ", ifelse(sw_test$p.value < 0.05, 
+                           "Violated", 
+                           "Assumption appears valid"), "\n")
+```
+
+```{r q-d}
+cat("4. Homoscedasticity: ", ifelse(bp_test$p.value < 0.05, 
+                                 "Violated", 
+                                 "Assumption appears valid"), "\n")
+```
+
+```{r q-d}
+cat("5. Multicollinearity: ", ifelse(any(vif_values > 5), 
+                                 "Problematic for some variables", 
+                                 "No severe issues detected"), "\n")
+```
+
+## (e) Consider any transformation of the independent and/or dependent variables in your chosen model from part c). State your final model and justify your choice.
+
+```{r q-e}
+calculate_diagnostics <- function(model, model_name) {
+  model_summary <- summary(model)
+  sw_test <- shapiro.test(residuals(model))
+  bp_test <- bptest(model)
+  rmse <- sqrt(mean(residuals(model)^2))
+  mae <- mean(abs(residuals(model)))
+  data.frame(
+    Model = model_name,
+    Adj_R_squared = model_summary$adj.r.squared,
+    RSE = model_summary$sigma,
+    AIC = AIC(model),
+    Shapiro_W = sw_test$statistic,
+    Shapiro_p = sw_test$p.value,
+    BP_stat = bp_test$statistic,
+    BP_p = bp_test$p.value,
+    RMSE = rmse,
+    MAE = mae
+  )
+}
+
+model_diagnostics <- data.frame()
+
+model_diagnostics <- rbind(model_diagnostics, 
+                          calculate_diagnostics(final_model, "Original"))
+
+if(all(weather$avg_temp > 0)) {
+  log_model <- update(final_model, log(avg_temp) ~ .)
+  model_diagnostics <- rbind(model_diagnostics, 
+                            calculate_diagnostics(log_model, "Log"))
+}
+
+if(all(weather$avg_temp >= 0)) {
+  sqrt_model <- update(final_model, sqrt(avg_temp) ~ .)
+  model_diagnostics <- rbind(model_diagnostics, 
+                            calculate_diagnostics(sqrt_model, "Square Root"))
+}
+
+bc <- boxcox(final_model, plotit = FALSE)
+lambda <- bc$x[which.max(bc$y)]
+cat("Optimal Box-Cox transformation parameter (lambda):", round(lambda, 4), "\n\n")
+
+if(abs(lambda - 1) > 0.1) {
+  if(abs(lambda) < 0.01) {
+    boxcox_model <- update(final_model, log(avg_temp) ~ .)
+    model_diagnostics <- rbind(model_diagnostics, 
+                              calculate_diagnostics(boxcox_model, "Box-Cox (Log)"))
+  } else {
+    weather_bc <- weather
+    weather_bc$avg_temp_bc <- (weather_bc$avg_temp^lambda - 1)/lambda
+    bc_formula <- as.formula(paste0("avg_temp_bc ~ ", 
+                                   paste(names(coef(final_model))[-1], collapse = " + ")))
+    boxcox_model <- lm(bc_formula, data = weather_bc)
+    model_diagnostics <- rbind(model_diagnostics, 
+                              calculate_diagnostics(boxcox_model, 
+                                                  paste0("Box-Cox (λ=", round(lambda, 2), ")")))
+  }
+}
+
+if("lat" %in% names(coef(final_model))) {
+  lat_sq_model <- update(final_model, . ~ . - lat + I(lat^2))
+  model_diagnostics <- rbind(model_diagnostics, 
+                            calculate_diagnostics(lat_sq_model, "Squared Latitude"))
+}
+
+model_diagnostics_formatted <- model_diagnostics %>%
+  mutate(
+    Adj_R_squared = round(Adj_R_squared, 4),
+    RSE = round(RSE, 4),
+    AIC = round(AIC, 2),
+    Shapiro_W = round(Shapiro_W, 4),
+    Shapiro_p = ifelse(Shapiro_p < 0.001, "< 0.001", round(Shapiro_p, 4)),
+    BP_stat = round(BP_stat, 2),
+    BP_p = ifelse(BP_p < 0.001, "< 0.001", round(BP_p, 4)),
+    RMSE = round(RMSE, 4),
+    MAE = round(MAE, 4)
+  )
+
+knitr::kable(model_diagnostics_formatted, 
+             caption = "Comparison of Model Diagnostics Across Transformations")
+```
+
+```{r q-e}
+best_models <- data.frame(
+  Criterion = c("Adjusted R-squared", "Normality (Shapiro-Wilk)", 
+               "Homoscedasticity (BP)", "RMSE", "MAE"),
+  Best_Model = c(
+    model_diagnostics$Model[which.max(model_diagnostics$Adj_R_squared)],
+    model_diagnostics$Model[which.max(model_diagnostics$Shapiro_p)],
+    model_diagnostics$Model[which.max(model_diagnostics$BP_p)],
+    model_diagnostics$Model[which.min(model_diagnostics$RMSE)],
+    model_diagnostics$Model[which.min(model_diagnostics$MAE)]
+  )
+)
+
+knitr::kable(best_models, caption = "Best Model by Diagnostic Criterion")
+```
+
+```{r q-e}
+best_model_overall <- names(sort(table(best_models$Best_Model), decreasing = TRUE))[1]
+
+cat("\n### Final Model Selection\n\n")
+cat("Based on the comprehensive diagnostic assessment, the", best_model_overall, 
+    "transformation provides the best overall improvement in model diagnostics.\n\n")
+```
+
+```{r q-e}
+chosen_model_name <- best_model_overall
+if(chosen_model_name == "Original") {
+  chosen_model <- final_model
+  transformation_description <- "No transformation needed"
+} else if(chosen_model_name == "Log") {
+  chosen_model <- log_model
+  transformation_description <- "Natural logarithm of average temperature"
+} else if(chosen_model_name == "Square Root") {
+  chosen_model <- sqrt_model
+  transformation_description <- "Square root of average temperature"
+} else if(grepl("Box-Cox", chosen_model_name)) {
+  chosen_model <- boxcox_model
+  transformation_description <- paste0("Box-Cox transformation with λ=", round(lambda, 4))
+} else if(chosen_model_name == "Squared Latitude") {
+  chosen_model <- lat_sq_model
+  transformation_description <- "Squared latitude term to address non-linearity"
+}
+```
+
+```{r q-e}
+cat("### Justification\n\n")
+cat("1. **Transformation Applied:**", transformation_description, "\n\n")
+
+original_metrics <- model_diagnostics[model_diagnostics$Model == "Original", ]
+chosen_metrics <- model_diagnostics[model_diagnostics$Model == chosen_model_name, ]
+```
+
+```{r q-e}
+cat("2. **Improvement in Model Diagnostics:**\n")
+cat("   - Normality: ", 
+    ifelse(as.numeric(ifelse(chosen_metrics$Shapiro_p == "< 0.001", 0.0001, 
+                           as.numeric(chosen_metrics$Shapiro_p))) > 
+          as.numeric(ifelse(original_metrics$Shapiro_p == "< 0.001", 0.0001, 
+                           as.numeric(original_metrics$Shapiro_p))),
+         "Improved", "No improvement"), "\n")
+cat("   - Homoscedasticity: ", 
+    ifelse(as.numeric(ifelse(chosen_metrics$BP_p == "< 0.001", 0.0001, 
+                           as.numeric(chosen_metrics$BP_p))) > 
+          as.numeric(ifelse(original_metrics$BP_p == "< 0.001", 0.0001, 
+                           as.numeric(original_metrics$BP_p))),
+         "Improved", "No improvement"), "\n")
+cat("   - Model Fit (Adj. R²): ", 
+    ifelse(chosen_metrics$Adj_R_squared > original_metrics$Adj_R_squared,
+         "Improved", "Slightly decreased"), "\n")
+cat("   - Prediction Error (RMSE): ", 
+    ifelse(chosen_metrics$RMSE < original_metrics$RMSE,
+         "Improved", "Slightly increased"), "\n\n")
+```
+
+```{r q-e}
+cat("3. **Impact on Interpretation:**\n")
+if(chosen_model_name == "Original") {
+  cat("   - The original model is maintained, preserving straightforward interpretation\n")
+  cat("   - Each coefficient directly represents the change in average temperature (°F)\n")
+  cat("     for a one-unit increase in the predictor, holding other variables constant\n")
+} else if(chosen_model_name == "Log") {
+  cat("   - Coefficients now represent the percentage change in average temperature\n")
+  cat("   - For example, a one-unit increase in latitude is associated with a\n")
+  cat("     approximately", round(100 * coef(chosen_model)["lat"], 2), 
+     "% change in average temperature\n")
+} else if(chosen_model_name == "Square Root") {
+  cat("   - Transformation stabilises variance but makes interpretation less direct\n")
+  cat("   - Effects are non-linear in the original scale\n")
+} else if(grepl("Box-Cox", chosen_model_name)) {
+  cat("   - Box-Cox transformation with λ =", round(lambda, 4), "optimises model fit\n")
+  cat("   - Interpretation requires back-transformation to the original scale\n")
+} else if(chosen_model_name == "Squared Latitude") {
+  cat("   - Addressing non-linearity in the latitude relationship\n")
+  cat("   - Effect of latitude now varies by latitude level, capturing curvature\n")
+}
+```
+
+-   For the Report
+
+```{r q-e}
+cat("\n4. **Recommendation for the Travel Agency:**\n")
+cat("   Based on the statistical improvements and practical considerations,\n")
+cat("   the", chosen_model_name, "model is recommended for the travel agency's\n")
+cat("   temperature prediction needs.\n")
+```
+
+```{r q-e}
+cat("\n### Final Model Summary\n")
+print(summary(chosen_model))
+```
+
+model_plots <- list(
+  "variable_importance" = predictor_importance_plot,
+  "model_diagnostics" = grid.arrange(
+    actual_vs_pred,
+    residual_plot,
+    ncol = 2
+  ),
+  "model_comparison" = ggplot(model_comparison, aes(x = Model, y = R_squared)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    labs(title = "Model Comparison",
+         x = "Model Type",
+         y = "R-squared") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+)
+
+# Set custom dimensions for specific plots
+attr(model_plots$model_diagnostics, "width") <- 12
+attr(model_plots$model_diagnostics, "height") <- 6
+attr(model_plots$variable_importance, "width") <- 10
+attr(model_plots$variable_importance, "height") <- 8
+
+# Save the plots
+save_visualisations(model_plots, prefix = "model_building")
+
+```{r q-e}
+export_selected_functions("notebooks/03_model_building.Rmd")
+```
+
+```{r q-e}
+saveRDS(chosen_model, file = "data/processed/final_model.rds")
+```

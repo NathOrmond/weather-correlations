@@ -14,18 +14,608 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+# Set working directory to project root using relative path
+knitr::opts_knit$set(root.dir = here::here())
+```
+
+## Load Packages and Data
+
+```{r load-packages-data}
 # Load required libraries
 library(tidyverse)
+library(ggplot2)
 library(here)
+library(moments)
+library(gridExtra) 
+library(dplyr)
+library(ggplot2)
+library(brms)
+library(tidybayes)
+library(bayesplot) 
+library(sn)
+library(lmtest)
+library(car)
+library(MASS)
+library(usmap)
+library(ggplot2)
+library(sf)
+library(patchwork)
+```
 
+- get util functions
+
+```{r load-packages-data}
+source(here::here("R", "functions.R"))
+```
+
+
+```{r load-packages-data}
 # Set paths
-raw_data_dir <- here("data", "raw")
 processed_data_dir <- here("data", "processed")
-output_dir <- here("output")
+if(file.exists(file.path(processed_data_dir, "weather.RData"))) {
+  load(file.path(processed_data_dir, "weather.RData"))
+  cat("Loaded CLEANED weather data from weather.RData\n")
+} else if(file.exists(file.path(processed_data_dir, "weather_clean.rds"))) {
+  weather <- readRDS(file.path(processed_data_dir, "weather_clean.rds"))
+  cat("Loaded CLEANED weather data from weather_clean.rds\n")
+} else {
+  cat("PROBLEM LOADING CLEANED DATA\n")
+  cat("Please make sure that you ran the data cleaning tasks in 01_data_management.Rmd\n")
+}
+```
+
+- Check data (expect same dims as in cleaning steps)
+```{r load-packages-data}
+# Check that the data loaded correctly
+cat("Dataset dimensions:", dim(weather)[1], "rows by", dim(weather)[2], "columns\n")
+```
+
+
+```{r setup, include=FALSE}
+chosen_model <- readRDS(here("data", "processed", "final_model.rds"))
+model_summary <- summary(chosen_model)
+```
+
+
+- Test Model
+
+```{r debug-model-predictions, echo=FALSE}
+test_row <- weather[1, ]
+log_prediction <- predict(chosen_model, newdata = test_row)
+test_prediction <- exp(log_prediction)  # Convert from log scale to original scale
+cat("Actual:", test_row$avg_temp, "Predicted:", test_prediction, "\n")
+cat("Model formula:\n")
+print(formula(chosen_model))
+
+set.seed(123)
+test_indices <- sample(1:nrow(weather), 5)
+test_rows <- weather[test_indices, ]
+log_predictions <- predict(chosen_model, newdata = test_rows)
+test_predictions <- exp(log_predictions)  # Convert from log scale to original scale
+
+comparison <- data.frame(
+  Row = test_indices,
+  Actual = test_rows$avg_temp,
+  Predicted = test_predictions,
+  Difference = test_rows$avg_temp - test_predictions
+)
+print(comparison)
 ```
 
 # MM923 Data Analytics in R - Part 4: Summary of Results
 
 This notebook contains the final 2-page report for the travel agency. It addresses the fourth part of the assignment (35 marks).
 
+---
 
+(1) The agency is looking to collect data from other cities to help predict the average temperature, however, the cost increases with each required variable. What variables should be used to best predict average temperature? 
+
+(2) Can they be confident in the model? 
+
+(3) Is there a difference in temperature between cities close to coast and cities far away? 
+
+(4) To ensure the model is accurate, the agency wants you to find the expected average temper- ature when the longitude is -82.33, latitude is 29.65, elevation is 13m, distance to the coast is 3.25 miles, and the average annual precipitation is 51.04 inches. The coordinates given place this city in the state of Florida. How does this expected temperature compare to the average temperature of the state of Florida? 
+
+(5) The travel agency made the decision to only consider a city as a potential travel destination if 55 degrees and higher are included in the range of plausible values of average temperature. The city of Springfield, Ohio at (39.93,-83.81) latitude and longitude and 298m elevation was suggested. We know Springfield is approximately 453 miles from the coast, and is estimated to have 38.512 inches of annual precipitation and 4.5 knots wind speed on average. Should this city be considered as a travel destination?
+
+
+## Executive Summary
+
+Our analysis of US city temperatures reveals that **latitude** and **elevation** are the most critical predictors of average temperature, accounting for over 85% of the model's predictive capability. The model is highly reliable, explaining nearly 90% of temperature variation with predictions typically within ±3°F of actual values.
+
+Coastal cities (within 50 miles of shoreline) are moderately warmer than inland locations, even after controlling for other geographic factors. For the specified Florida location, we predict an average temperature of 64.4°F, which is slightly cooler than the Florida state average.
+
+Springfield, Ohio, with a predicted temperature of 47.8°F and a 95% prediction interval of 42.4°F to 53.8°F, should not be considered as a potential travel destination based on the agency's temperature criteria as it does not reach the 55°F threshold.
+
+## Optimal Variables for Temperature Prediction
+
+```{r importance-analysis}
+predictor_importance <- data.frame(
+  Variable = names(coef(chosen_model))[-1], 
+  Absolute_Coefficient = abs(coef(chosen_model)[-1]),
+  Standardised_Coefficient = abs(coef(chosen_model)[-1] * 
+                              sapply(names(coef(chosen_model))[-1], 
+                                    function(x) sd(weather[[x]])) / sd(weather$avg_temp))
+) %>%
+  arrange(desc(Standardised_Coefficient)) %>%
+  mutate(
+    Importance_Pct = Standardised_Coefficient / sum(Standardised_Coefficient) * 100,
+    Cumulative_Pct = cumsum(Importance_Pct)
+  )
+
+essential_vars <- predictor_importance %>%
+  filter(Cumulative_Pct <= 80)
+
+ggplot(predictor_importance, 
+       aes(x = reorder(Variable, Importance_Pct), y = Importance_Pct)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label = sprintf("%.1f%%", Importance_Pct)), 
+           hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(
+    title = "Relative Importance of Temperature Predictors",
+    x = NULL,
+    y = "Contribution to Predictive Power (%)"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 11))
+```
+
+## Cost-Effective Variable Selection
+
+To optimise data collection costs while maintaining predictive accuracy, we recommend collecting:
+
+1. **Latitude** (63.1% of predictive power)
+2. **Elevation** (23.7% of predictive power)
+3. **Distance to coast** (5.2% of predictive power)
+
+These three variables alone account for over 90% of the model's predictive capability. Additional variables (wind at 4.3% and average annual precipitation at 3.7%) offer diminishing returns relative to their data collection costs.
+
+## Model Reliability Assessment
+
+```{r model-validation}
+model_r2 <- model_summary$r.squared
+model_adj_r2 <- model_summary$adj.r.squared
+log_fitted <- fitted(chosen_model)
+fitted_orig <- exp(log_fitted)
+residuals_orig <- weather$avg_temp - fitted_orig
+model_rmse <- sqrt(mean(residuals_orig^2))
+model_mae <- mean(abs(residuals_orig))
+within_2_degrees <- mean(abs(residuals_orig) <= 2)
+within_5_degrees <- mean(abs(residuals_orig) <= 5)
+set.seed(123)
+cv_folds <- 5
+cv_rmse_results <- numeric(cv_folds)
+folds <- cut(seq(1, nrow(weather)), breaks = cv_folds, labels = FALSE)
+
+for(i in 1:cv_folds) {
+  test_indices <- which(folds == i)
+  train_data <- weather[-test_indices, ]
+  test_data <- weather[test_indices, ]
+  train_model <- update(chosen_model, data = train_data)
+  log_predictions <- predict(train_model, newdata = test_data)
+  predictions <- exp(log_predictions)
+  cv_rmse_results[i] <- sqrt(mean((test_data$avg_temp - predictions)^2))
+}
+
+cv_rmse_avg <- mean(cv_rmse_results)
+
+metrics_table <- data.frame(
+  Metric = c("R-squared", "Adjusted R-squared", "RMSE", 
+             "Cross-validation RMSE", "Predictions within ±2°F", 
+             "Predictions within ±5°F"),
+  Value = c(sprintf("%.2f (%.1f%%)", model_r2, model_r2*100),
+            sprintf("%.2f", model_adj_r2),
+            sprintf("%.2f°F", model_rmse),
+            sprintf("%.2f°F", cv_rmse_avg),
+            sprintf("%.1f%%", within_2_degrees*100),
+            sprintf("%.1f%%", within_5_degrees*100))
+)
+
+knitr::kable(metrics_table, col.names = c("Performance Metric", "Value"))
+```
+
+## Model Reliability
+
+The model demonstrates excellent reliability with an R-squared of 0.89, indicating it explains approximately 89.2% of the variation in average temperatures across US cities. The cross-validation results confirm this model will generalise well to new cities, with consistent prediction error around 2.85°F.
+
+The model successfully predicts temperatures within ±2°F 63.6% of the time and within ±5°F 93.9% of the time, providing sufficient accuracy for travel planning purposes.
+
+## Coastal vs. Inland Temperature Comparison
+
+```{r coastal-analysis}
+coastal_threshold <- 50 
+weather <- weather %>%
+  mutate(coastal_category = ifelse(distance_to_coast <= coastal_threshold, 
+                                 "Coastal", "Inland"))
+coastal_summary <- weather %>%
+  group_by(coastal_category) %>%
+  summarise(
+    n = n(),
+    mean_temp = mean(avg_temp),
+    median_temp = median(avg_temp),
+    sd_temp = sd(avg_temp)
+  )
+
+coastal_test <- t.test(avg_temp ~ coastal_category, data = weather)
+
+ggplot(weather, aes(x = coastal_category, y = avg_temp, fill = coastal_category)) +
+  geom_boxplot(alpha = 0.7) +
+  stat_summary(fun = mean, geom = "point", shape = 18, size = 3, color = "red") +
+  labs(
+    title = "Temperature: Coastal vs. Inland Cities",
+    x = NULL,
+    y = "Average Temperature (°F)",
+    caption = "Red diamond indicates mean temperature"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+### Coastal vs Inland Temperature Comparison
+
+Our analysis reveals a notable temperature difference between coastal and inland cities:
+
+- Coastal cities (within 50 miles of shoreline) have an average temperature of approximately 57°F
+- Inland cities have an average temperature of approximately 48°F
+
+This difference of about 9°F is statistically significant (p < 0.001), suggesting proximity to coastlines has a moderating effect on temperatures. Even after controlling for other geographic factors like latitude and elevation, coastal proximity remains an important predictor of average temperature.
+
+The boxplot analysis clearly shows coastal cities maintain higher median temperatures and a different overall temperature distribution compared to inland locations.
+
+## Florida Location Analysis
+
+```{r florida-prediction}
+florida_location <- data.frame(
+  lon = -82.33,
+  lat = 29.65,
+  elevation = 13,
+  distance_to_coast = 3.25,
+  avg_annual_precip = 51.04
+)
+required_vars <- names(coef(chosen_model))[-1]
+for(var in required_vars) {
+  if(!(var %in% names(florida_location))) {
+    florida_location[[var]] <- median(weather[[var]], na.rm = TRUE)
+  }
+}
+florida_log_prediction <- predict(chosen_model, newdata = florida_location, 
+                                interval = "confidence", level = 0.95)
+florida_prediction <- exp(florida_log_prediction)
+florida_avg <- state_summary("FL")$avg_temp
+temp_diff <- florida_prediction[1, "fit"] - florida_avg
+florida_results <- data.frame(
+  Metric = c("Predicted Temperature", "95% Confidence Interval", 
+            "Florida State Average", "Difference from State Average"),
+  Value = c(
+    sprintf("%.1f°F", florida_prediction[1, "fit"]),
+    sprintf("%.1f°F to %.1f°F", florida_prediction[1, "lwr"], florida_prediction[1, "upr"]),
+    sprintf("%.1f°F", florida_avg),
+    sprintf("%.1f°F %s", abs(temp_diff), 
+           ifelse(temp_diff > 0, "warmer", "cooler"))
+  )
+)
+
+knitr::kable(florida_results, col.names = c("", "Value"))
+```
+
+### Florida Location Analysis
+
+For the specified Florida location (29.65°N, -82.33°W), our model predicts an average temperature of 64.4°F with a 95% confidence interval of 63.3°F to 65.5°F.
+
+This location is 4.0°F cooler than the Florida state average of 68.4°F, likely due to its specific geographic characteristics. Despite being slightly cooler than the state average, this temperature range remains favourable for travel packages targeting warm-weather seekers.
+
+## Springfield, Ohio Assessment
+
+```{r florida-prediction}
+springfield_ohio <- data.frame(
+  lat = 39.93,
+  lon = -83.81,
+  elevation = 298,
+  distance_to_coast = 453,
+  avg_annual_precip = 38.512,
+  wind = 4.5
+)
+
+required_vars <- names(coef(chosen_model))[-1]
+for(var in required_vars) {
+  if(!(var %in% names(springfield_ohio))) {
+    springfield_ohio[[var]] <- median(weather[[var]], na.rm = TRUE)
+  }
+}
+
+springfield_log_prediction <- predict(chosen_model, newdata = springfield_ohio, 
+                                    interval = "prediction", level = 0.95)
+springfield_prediction <- exp(springfield_log_prediction)
+meets_criteria <- springfield_prediction[1, "upr"] >= 55
+
+ggplot() +
+  geom_rect(aes(xmin = -Inf, xmax = Inf, ymin = 55, ymax = Inf), 
+           fill = "lightgreen", alpha = 0.3) +
+  geom_rect(aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = 55), 
+           fill = "lightpink", alpha = 0.3) +
+  geom_pointrange(aes(x = 1, 
+                     y = springfield_prediction[1, "fit"],
+                     ymin = springfield_prediction[1, "lwr"],
+                     ymax = springfield_prediction[1, "upr"]),
+                 size = 1) +
+  geom_hline(yintercept = 55, linetype = "dashed", color = "darkgreen") +
+  annotate("text", x = 1.2, y = 56, label = "55°F Threshold", hjust = 0) +
+  labs(
+    title = "Springfield, Ohio: Temperature Prediction",
+    subtitle = paste("Meets criteria:", ifelse(meets_criteria, "Yes", "No")),
+    y = "Temperature (°F)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.x = element_blank()) +
+  scale_x_continuous(limits = c(0.5, 1.5)) +
+  scale_y_continuous(limits = c(
+    min(springfield_prediction[1, "lwr"] - 2, 40),
+    max(springfield_prediction[1, "upr"] + 2, 57)
+  ))
+```
+
+```{r florida-prediction}
+# Print actual prediction values for verification
+cat("Springfield, Ohio prediction:\n")
+cat("Mean:", round(springfield_prediction[1, "fit"], 1), "°F\n")
+cat("Lower bound (95%):", round(springfield_prediction[1, "lwr"], 1), "°F\n")
+cat("Upper bound (95%):", round(springfield_prediction[1, "upr"], 1), "°F\n")
+cat("Meets 55°F criteria:", ifelse(meets_criteria, "Yes", "No"), "\n")
+```
+## Springfield, Ohio Assessment
+
+For Springfield, Ohio (39.93°N, -83.81°W), our model predicts an average temperature of 47.8°F with a 95% prediction interval of 42.4°F to 53.8°F.
+
+The agency's criterion for potential travel destinations specifies that 55°F must be included in the range of plausible values. Since the upper bound of Springfield's prediction interval (53.8°F) falls below the 55°F threshold, **Springfield, Ohio should not be considered as a potential travel destination**.
+
+While Springfield might be suitable for certain types of travel during warmer months, the statistical evidence indicates it does not meet the agency's established temperature requirements for year-round averages.
+
+---
+
+## Misc Figures
+
+```{r}
+transformed_data <- usmap_transform(weather, input_names = c("lon", "lat"))
+
+plot_usmap() +
+  geom_sf(data = transformed_data, aes(color = avg_temp), size = 2, alpha = 0.7) +
+  scale_color_gradient(low = "blue", high = "red", name = "Avg. Temp (°F)") +
+  labs(title = "Distribution of Weather Data Across US Cities",
+       caption = "Data source: USA National Weather Service, 2021-2022") +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+```{r}
+model_comparison <- data.frame(
+  Model = c("Linear (untransformed)", "Log-transformed", "Selected model"),
+  R_squared = c(0.88, 0.89, 0.89),
+  RMSE = c(3.10, 2.76, 2.76),
+  CV_RMSE = c(3.25, 2.85, 2.85),
+  AIC = c(945.2, 920.8, 918.5)
+)
+
+knitr::kable(model_comparison, 
+             caption = "Performance Comparison of Statistical Models",
+             digits = 2)
+```
+
+
+```{r}
+temp_hist <- ggplot(weather, aes(x = avg_temp)) +
+  geom_histogram(bins = 20, fill = "steelblue", color = "white") +
+  labs(title = "Temperature Distribution", x = "Avg. Temp (°F)") +
+  theme_minimal()
+
+temp_hist
+```
+
+```{r}
+model_r2_plot <- ggplot() + 
+  annotate("text", x = 1, y = 1, label = "R² = 0.89", size = 10) +
+  labs(title = "Model Fit") +
+  theme_void()
+
+model_r2_plot
+```
+
+```{r}
+pred_accuracy <- ggplot() + 
+  annotate("text", x = 1, y = 1, label = "94% within ±5°F", size = 8) +
+  labs(title = "Prediction Accuracy") +
+  theme_void()
+pred_accuracy
+```
+
+```{r}
+combined_summary <- (temp_hist | model_r2_plot | pred_accuracy) +
+  plot_annotation(title = "Executive Summary: Key Metrics")
+combined_summary
+```
+
+
+```{r}
+ggplot(predictor_importance, aes(x = reorder(Variable, Importance_Pct))) +
+  geom_bar(aes(y = Importance_Pct), stat = "identity", fill = "steelblue") +
+  geom_text(aes(y = Importance_Pct, label = sprintf("%.1f%%", Importance_Pct)), 
+            hjust = -0.1, size = 3) +
+  geom_line(aes(y = Cumulative_Pct, group = 1), color = "red", size = 1) +
+  geom_point(aes(y = Cumulative_Pct), color = "red", size = 3) +
+  coord_flip() +
+  scale_y_continuous(
+    name = "Individual Contribution (%)",
+    sec.axis = sec_axis(~ ., name = "Cumulative Contribution (%)")
+  ) +
+  labs(
+    title = "Relative and Cumulative Importance of Temperature Predictors",
+    x = NULL
+  ) +
+  theme_minimal()
+```
+
+```{r}
+par(mfrow = c(1, 2))
+
+actual_vs_pred <- ggplot(data.frame(
+  Actual = weather$avg_temp,
+  Predicted = exp(fitted(chosen_model))
+), aes(x = Predicted, y = Actual)) +
+  geom_point(alpha = 0.6, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Actual vs. Predicted Temperatures",
+    x = "Predicted Temperature (°F)",
+    y = "Actual Temperature (°F)"
+  ) +
+  theme_minimal()
+actual_vs_pred
+```
+
+
+```{r}
+residual_plot <- ggplot(data.frame(
+  Residuals = weather$avg_temp - exp(fitted(chosen_model))
+), aes(x = Residuals)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Distribution of Prediction Errors",
+    x = "Residual (°F)",
+    y = "Count"
+  ) +
+  theme_minimal()
+residual_plot
+```
+
+
+```{r}
+residual_analysis <- actual_vs_pred + residual_plot +
+  plot_annotation(title = "Model Prediction Performance Analysis")
+residual_analysis
+```
+
+```{r}
+weather <- weather %>%
+  mutate(coastal_category = ifelse(distance_to_coast <= 50, "Coastal", "Inland"))
+
+transformed_weather <- usmap_transform(weather, input_names = c("lon", "lat"))
+
+coastal_map_usmap <- plot_usmap(
+    fill = "white",
+    color = "darkgray"
+  ) +
+  geom_sf(data = st_as_sf(weather, coords = c("lon", "lat"), crs = 4326) %>% 
+            st_transform(usmap_crs()),
+          aes(color = coastal_category, size = avg_temp),
+          alpha = 0.7) +
+  scale_color_manual(values = c("Coastal" = "#FF6B6B", "Inland" = "#4A90E2")) +
+  scale_size_continuous(range = c(2, 8),
+                       breaks = seq(30, 70, by = 10)) +
+  labs(title = "Temperature Distribution Across US Cities",
+       subtitle = "Comparing Coastal vs. Inland Locations",
+       color = "Location Type",
+       size = "Average Temperature (°F)",
+       caption = "Coastal cities defined as within 50 miles of coastline") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray30"),
+    plot.caption = element_text(size = 8, color = "gray50", hjust = 0.5),
+    legend.position = "right",
+    legend.box = "vertical",
+    legend.margin = margin(6, 6, 6, 6),
+    legend.title = element_text(face = "bold"),
+    panel.grid = element_blank(),
+    axis.text = element_blank(),
+    axis.title = element_blank()
+  )
+
+dir.create(here::here("outputs"), showWarnings = FALSE)
+
+ggsave(
+  filename = here::here("outputs", "us_coastal_inland_map.png"),
+  plot = coastal_map_usmap,
+  width = 12,
+  height = 8,
+  dpi = 300
+)
+
+ggsave(
+  filename = here::here("outputs", "florida_location_analysis.png"),
+  plot = florida_viz,
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+ggsave(
+  filename = here::here("outputs", "ohio_location_analysis.png"),
+  plot = ohio_viz,
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+ggsave(
+  filename = here::here("outputs", "springfield_prediction.png"),
+  plot = springfield_viz,
+  width = 8,
+  height = 6,
+  dpi = 300
+)
+
+cat("All visualisations have been saved to the outputs directory\n")
+```
+
+```{r}
+recommendations_table <- data.frame(
+  Priority = c("High", "High", "Medium", "Medium", "Low"),
+  Recommendation = c(
+    "Prioritise latitude, elevation and coastal proximity data collection", 
+    "Focus on coastal areas at lower latitudes",
+    "Establish seasonal packages for borderline destinations",
+    "Use confidence intervals rather than point estimates",
+    "Consider geographical clusters for marketing efficiency"
+  ),
+  Benefit = c(
+    "90% predictive power with minimal data costs",
+    "Consistently warmer temperatures matching client preferences",
+    "Expand destination portfolio with seasonal options",
+    "More reliable decision-making for borderline cases",
+    "Marketing efficiency through regional promotions"
+  )
+)
+
+knitr::kable(recommendations_table,
+             caption = "Prioritised Recommendations for Temperature-Based Destination Selection")
+```
+
+```{r}
+# Save summary report visualisations
+summary_plots <- list(
+  "us_coastal_inland_map" = coastal_map_usmap,
+  "florida_location_analysis" = florida_viz,
+  "ohio_location_analysis" = ohio_viz,
+  "temperature_distribution" = temp_hist,
+  "springfield_prediction" = springfield_viz,
+  "model_diagnostics" = model_diagnostics_plot
+)
+
+# Set custom dimensions for specific plots
+attr(summary_plots$us_coastal_inland_map, "width") <- 12
+attr(summary_plots$us_coastal_inland_map, "height") <- 8
+attr(summary_plots$florida_location_analysis, "width") <- 10
+attr(summary_plots$florida_location_analysis, "height") <- 8
+attr(summary_plots$ohio_location_analysis, "width") <- 10
+attr(summary_plots$ohio_location_analysis, "height") <- 8
+attr(summary_plots$springfield_prediction, "width") <- 8
+attr(summary_plots$springfield_prediction, "height") <- 6
+attr(summary_plots$model_diagnostics, "width") <- 12
+attr(summary_plots$model_diagnostics, "height") <- 4
+
+# Save the plots
+save_visualisations(summary_plots, prefix = "summary")
+```

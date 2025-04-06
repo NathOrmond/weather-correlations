@@ -1,6 +1,6 @@
 ---
 title: "MM923 Data Analytics in R - Part 2: Exploring the Data"
-author: "Your Name"
+author: "Nathan Ormond"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
 output: 
   html_document:
@@ -12,20 +12,1259 @@ output:
     df_print: paged
 ---
 
-```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-# Load required libraries
-library(tidyverse)
-library(here)
-
-# Set paths
-raw_data_dir <- here("data", "raw")
-processed_data_dir <- here("data", "processed")
-output_dir <- here("output")
-```
-
 # MM923 Data Analytics in R - Part 2: Exploring the Data
 
 This notebook contains code and documentation for exploratory data analysis of the weather data. It addresses the second part of the assignment (20 marks).
 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+# Set working directory to project root using relative path
+knitr::opts_knit$set(root.dir = here::here())
+source(here::here("R", "functions.R"))
+```
 
+## Load Packages and Data
+
+```{r load-packages-data}
+# Load required libraries
+library(tidyverse)
+library(ggplot2)
+library(here)
+library(moments)
+library(gridExtra) 
+library(dplyr)
+library(ggplot2)
+library(brms)
+library(tidybayes)
+library(bayesplot) 
+library(sn)
+library(usethis)
+```
+
+- get util functions
+
+```{r load-packages-data}
+source(here::here("R", "functions.R"))
+```
+
+
+```{r load-packages-data}
+# Set paths
+processed_data_dir <- here("data", "processed")
+if(file.exists(file.path(processed_data_dir, "weather.RData"))) {
+  load(file.path(processed_data_dir, "weather.RData"))
+  cat("Loaded CLEANED weather data from weather.RData\n")
+} else if(file.exists(file.path(processed_data_dir, "weather_clean.rds"))) {
+  weather <- readRDS(file.path(processed_data_dir, "weather_clean.rds"))
+  cat("Loaded CLEANED weather data from weather_clean.rds\n")
+} else {
+  cat("PROBLEM LOADING CLEANED DATA\n")
+  cat("Please make sure that you ran the data cleaning tasks in 01_data_management.Rmd\n")
+}
+```
+
+- Check data (expect same dims as in cleaning steps)
+```{r load-packages-data}
+# Check that the data loaded correctly
+cat("Dataset dimensions:", dim(weather)[1], "rows by", dim(weather)[2], "columns\n")
+```
+
+---
+
+## Average Temperature
+- (a) Provide a histogram of the average temperature and provide suitable measures of location and spread.
+
+### Histogram of average temperature 
+
+```{r histogram}
+# Create histogram of average temperature
+ggplot(weather, aes(x = avg_temp)) +
+  geom_histogram(binwidth = 2, fill = "steelblue", color = "white", alpha = 0.7) +
+  labs(
+    title = "Distribution of Average Temperatures Across US Cities",
+    x = "Average Temperature (°F)",
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold")
+  )
+```
+- Looks Gaussian ish
+- Lets do more tests for normality 
+
+- Basic summary stats
+```{r histogram}
+temp_summary <- weather %>%
+  summarise(
+    n = n(),
+    min = min(avg_temp),
+    q1 = quantile(avg_temp, 0.25),
+    median = median(avg_temp),
+    mean = mean(avg_temp),
+    q3 = quantile(avg_temp, 0.75),
+    max = max(avg_temp),
+    range = max(avg_temp) - min(avg_temp),
+    sd = sd(avg_temp),
+    cv = sd(avg_temp) / mean(avg_temp) * 100,
+    iqr = IQR(avg_temp),
+    skewness = (mean(avg_temp) - median(avg_temp)) / sd(avg_temp)
+  )
+
+print(temp_summary)
+```
+
+- Bayesian model fitting (will become clearer why at conclusion of this section -- rabbit hole!)
+```{r histogram}
+model_intervals <- brm(
+  avg_temp ~ 1,
+  data = weather,
+  family = student(),
+  chains = 4,
+  iter = 2000,
+  seed = 123
+) %>%
+  spread_draws(b_Intercept, sigma, nu) %>%
+  median_qi(b_Intercept, sigma, nu, .width = c(0.95, 0.89, 0.50))
+
+print(model_intervals)
+```
+
+#### Assessment of normality
+
+```{r histogram}
+# Create a temporary data frame for analysis
+temp_analysis <- data.frame(avg_temp = weather$avg_temp)
+
+# Calculate standardised values, theoretical quantiles, and residuals
+temp_analysis <- temp_analysis %>%
+  mutate(
+    standardised_temp = (avg_temp - mean(avg_temp, na.rm = TRUE)) / sd(avg_temp, na.rm = TRUE),
+    theoretical_quantiles = qnorm(ppoints(length(avg_temp))),
+    residuals = standardised_temp - theoretical_quantiles
+  )
+
+head(temp_analysis)
+```
+
+- I'm also going to simulate a normal distribution for this data so I can clearly visualise any differences (because my statistics intuitions aint so good)
+```{r histogram}
+# Assuming temp_analysis already exists with avg_temp, standardised_temp, and theoretical_quantiles
+# Calculate mean and sd of avg_temp for theoretic distribution
+mean_temp <- mean(temp_analysis$avg_temp, na.rm = TRUE)
+sd_temp <- sd(temp_analysis$avg_temp, na.rm = TRUE)
+
+# Generate simulated normal data with the same mean, sd, and length as avg_temp
+set.seed(123)  # Seed 123 for reproducibility because REAL randomness aint so random!
+simulated_normal <- rnorm(n = length(temp_analysis$avg_temp), mean = mean_temp, sd = sd_temp)
+
+# Data frame for simulated analysis
+# Make sure it has residuals
+simulated_analysis <- data.frame(
+  sim_temp = simulated_normal
+) %>%
+  mutate(
+    standardised_sim_temp = (sim_temp - mean(sim_temp, na.rm = TRUE)) / sd(sim_temp, na.rm = TRUE),
+    theoretical_quantiles = qnorm(ppoints(length(sim_temp))),
+    residuals = standardised_sim_temp - theoretical_quantiles
+  )
+```
+
+
+```{r histogram}
+# Q-Q Plot for Actual Data
+qq_actual <- ggplot(temp_analysis, aes(sample = avg_temp)) +
+  stat_qq(color = "blue", alpha = 0.6) +
+  stat_qq_line(color = "red", linetype = "dashed") +
+  labs(
+    title = "Q-Q Plot: Actual Average Temperature",
+    x = "Theoretical Quantiles",
+    y = "Sample Quantiles"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold")
+  )
+  coord_fixed(ratio = 1)
+
+# Q-Q Plot for Simulated Normal Data
+qq_simulated <- ggplot(simulated_analysis, aes(sample = sim_temp)) +
+  stat_qq(color = "green", alpha = 0.6) +
+  stat_qq_line(color = "red", linetype = "dashed") +
+  labs(
+    title = "Q-Q Plot: Simulated Normal Data",
+    x = "Theoretical Quantiles",
+    y = "Sample Quantiles"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold")
+  )
+  coord_fixed(ratio = 1)
+
+# Display side by side
+grid.arrange(qq_actual, qq_simulated, ncol = 2, widths = c(1, 1))
+```
+- Not Soooo different to be honest (BUT could be an x-direction squish distorting things so make sure you view this in pop out terminal window or whatever)
+- I guess this kind of aligns with the non-continuous nature of the data, 
+- The lower tail (left side) shows points falling below the line, indicating more extreme cold values than would be expected in a normal distribution
+- The middle section roughly follows the line
+- The upper tail (right side) shows points falling above the line, indicating more extreme warm values than would be expected
+- This S-shaped pattern suggests that your temperature data has a bimodal or multimodal distribution, which aligns with what we might expect for US climate data. This makes sense conceptually - the US spans multiple climate zones from very cold northern regions to very warm southern regions, leading to clusters of cities with similar temperature profiles rather than a smooth normal distribution.
+
+```{r histogram}
+# Scatter Plot for Actual Data
+scatter_actual <- ggplot(temp_analysis, aes(x = theoretical_quantiles, y = standardised_temp)) +
+  geom_point(color = "blue", alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Actual: Theoretical vs. Actual Quantiles",
+    x = "Theoretical Quantiles (Normal Distribution)",
+    y = "Standardised Average Temperature"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold")
+  )
+  coord_fixed(ratio = 1)
+
+# Scatter Plot for Simulated Normal Data
+scatter_simulated <- ggplot(simulated_analysis, aes(x = theoretical_quantiles, y = standardised_sim_temp)) +
+  geom_point(color = "green", alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Simulated: Theoretical vs. Actual Quantiles",
+    x = "Theoretical Quantiles (Normal Distribution)",
+    y = "Standardised Simulated Temperature"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold")
+  )
+  coord_fixed(ratio = 1)
+
+# Display side by side
+grid.arrange(scatter_actual, scatter_simulated, ncol = 2, widths = c(1, 1))
+```
+- Actual (left), Simulated (Right) seem (I mean surely I should be able to say something more "precise" than visually vibes based) similar to me
+- Line of Agreement (y = x): The red dashed line shows where points would lie if avg_temp were perfectly normal.
+- Middle Range (x: -1 to 1): Points close to the line suggest the central part of the data is approximately normal.
+- Tails (x < -1 or x > 1):
+  - Below Line (Lower Tail): More extreme low values than expected -> heavy lower tail.
+  - Above Line (Upper Tail): More extreme high values than expected -> heavy upper tail.
+- S-Shape Pattern: Points below the line at the lower tail, near the line in the middle, above the line at the upper tail -> heavy-tailed (leptokurtic) distribution.
+- Random Scatter?: Systematic S-shape means it's not random; indicates non-normality due to heavy tails.
+- Implication: Data isn't fully normal; consider transformations or non-parametric methods if normality is required. 
+- Could be the result of a few different distributions combined
+
+```{r histogram}
+# Histogram of Residuals for Actual Data
+hist_actual <- ggplot(temp_analysis, aes(x = residuals)) +
+  geom_histogram(bins = 30, fill = "blue", colour = "black", alpha = 0.6) +
+  labs(
+    title = "Histogram of Residuals: Actual Data",
+    x = "Residuals (Standardised Temp - Theoretical)",
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+    axis.title = element_text(face = "bold", size = 10),
+    axis.text = element_text(size = 8),
+    plot.margin = margin(5, 5, 5, 5)
+  ) +
+  coord_cartesian(xlim = c(-3, 3))  # Set consistent x-axis limits for comparison
+
+# Histogram of Residuals for Simulated Normal Data
+hist_simulated <- ggplot(simulated_analysis, aes(x = residuals)) +
+  geom_histogram(bins = 30, fill = "green", colour = "black", alpha = 0.6) +
+  labs(
+    title = "Histogram of Residuals: Simulated Normal Data",
+    x = "Residuals (Standardised Temp - Theoretical)",
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+    axis.title = element_text(face = "bold", size = 10),
+    axis.text = element_text(size = 8),
+    plot.margin = margin(5, 5, 5, 5)
+  ) +
+  coord_cartesian(xlim = c(-3, 3))  # Match x-axis limits with actual data
+
+grid.arrange(hist_actual, hist_simulated, ncol = 2, widths = c(1, 1))
+```
+- Remarkably similar! 
+
+
+- The Shapiro-Wilk tests for normality. 
+-H₀ (Null Hypothesis): The data comes from a normal distribution. In other words, the sample data (avg_temp or sim_temp) is consistent with being drawn from a population that is normally distributed.
+- H₁ (Alternative Hypothesis): The data does not come from a normal distribution. This means the sample data deviates significantly from what would be expected under a normal distribution (e.g., due to skewness, heavy tails, or other non-normal characteristics).
+>"The p-value from the Shapiro-Wilk test represents the probability of observing a test statistic as extreme as, or more extreme than, the one calculated if the null hypothesis were true." 
+- [P values should be interpreted as P values and not as measures of evidence](https://daniellakens.blogspot.com/2021/11/why-p-values-should-be-interpreted-as-p.html)
+
+```{r histogram}
+# Run Shapiro-Wilk test on both actual and simulated data
+shapiro_actual <- shapiro.test(weather$avg_temp)
+shapiro_simulated <- shapiro.test(simulated_analysis$sim_temp)
+
+# Define labels and significance levels
+test_name <- "Shapiro-Wilk Normality Test"
+statistic_label <- "Statistic (W)"
+p_value_label <- "p-value"
+significance_level_phrase <- "significance level"
+alpha_05 <- 0.05
+alpha_01 <- 0.01
+
+# Improved Shapiro-Wilk test output formatter
+shapiro_wilk_test_output_formatter <- function(test_result, alpha, significance_phrase = "significance level", condition) {
+  # Define common phrases
+  normal_dist <- "a normal distribution"
+  extreme_data <- "a test statistic as extreme as, or more extreme than, the observed value"
+  reject_null <- "reject the null hypothesis that the data comes from"
+  no_evidence <- "there is insufficient statistical evidence to"
+
+  # Extract p-value from test result
+  p_value <- test_result$p.value
+
+  # Format alpha as percentage for output
+  alpha_pct <- sprintf("%.1f%%", alpha * 100)
+
+  # Generate output based on condition
+  output <- switch(condition,
+                   "significant" = paste0(
+                     "The ", test_name, " yielded a ", p_value_label, " of ", round(p_value, 3),
+                     " (< ", alpha, ", ", alpha_pct, "). This suggests that if the data were from ",
+                     normal_dist, ", observing ", extreme_data, " would occur less than ", alpha_pct,
+                     " of the time."
+                   ),
+                   "not_significant" = paste0(
+                     "The ", test_name, " yielded a ", p_value_label, " of ", round(p_value, 3),
+                     " (≥ ", alpha, ", ", alpha_pct, "). This indicates ", no_evidence, " ",
+                     reject_null, " ", normal_dist, " at the ", significance_phrase, " of ", alpha, "."
+                   ),
+                   "stricter_significant" = paste0(
+                     "With a stricter ", significance_phrase, " of ", alpha, " (", alpha_pct,
+                     "), the ", p_value_label, " remains below this threshold. This reinforces that ",
+                     "observing ", extreme_data, " would be rare (< ", alpha_pct,
+                     " of the time) if the data were normally distributed."
+                   ),
+                   "stricter_not_significant" = paste0(
+                     "Even with a stricter ", significance_phrase, " of ", alpha, " (", alpha_pct,
+                     "), ", no_evidence, " ", reject_null, " ", normal_dist, "."
+                   )
+  )
+
+  # Return formatted output with newline
+  return(paste0(output, "\n"))
+}
+
+# Function to format and print Shapiro-Wilk test results for a given dataset
+print_shapiro_results <- function(test_result, data_label) {
+  cat(data_label, " - ", test_name, ":\n", sep = "")
+  cat(statistic_label, " = ", round(test_result$statistic, 3), ", ",
+      p_value_label, " = ", round(test_result$p.value, 3), "\n", sep = "")
+
+  # Test at alpha = 0.05
+  if (test_result$p.value < alpha_05) {
+    cat(shapiro_wilk_test_output_formatter(test_result, alpha_05, condition = "significant"))
+  } else {
+    cat(shapiro_wilk_test_output_formatter(test_result, alpha_05, condition = "not_significant"))
+  }
+
+  # Test at alpha = 0.01
+  if (test_result$p.value < alpha_01) {
+    cat(shapiro_wilk_test_output_formatter(test_result, alpha_01, condition = "stricter_significant"))
+  } else {
+    cat(shapiro_wilk_test_output_formatter(test_result, alpha_01, condition = "stricter_not_significant"))
+  }
+
+  cat("\n")  # Add spacing between actual and simulated results
+}
+
+# Print results for both actual and simulated data
+print_shapiro_results(shapiro_actual, "Actual Data")
+print_shapiro_results(shapiro_simulated, "Simulated Normal Data")
+
+```
+-  OK, it is looking fairly good then for normality here
+
+
+#### Visual Evidence Recap
+- Q-Q Plot and Scatter Plot (Theoretical vs. Actual Quantiles):
+- S-shaped pattern in the Q-Q plot and scatter plot for the actual data:
+- Points below the line at the lower tail (theoretical quantiles < -1).
+
+```{r histogram}
+# Calculate measures of location and spread
+temp_summary <- weather %>%
+  summarise(
+    n = n(),
+    min = min(avg_temp),
+    q1 = quantile(avg_temp, 0.25),
+    median = median(avg_temp),
+    mean = mean(avg_temp),
+    q3 = quantile(avg_temp, 0.75),
+    max = max(avg_temp),
+    range = max(avg_temp) - min(avg_temp),
+    sd = sd(avg_temp),
+    cv = sd(avg_temp) / mean(avg_temp) * 100, # coefficient of variation
+    iqr = IQR(avg_temp),
+    skewness = (mean(avg_temp) - median(avg_temp)) / sd(avg_temp) # rough measure of skewness
+  )
+
+knitr::kable(temp_summary, 
+             caption = "Summary statistics for average temperature",
+             digits = 3)
+```
+
+**NOTES:**
+- Mean (50.77) vs. Median (49.681): The mean is slightly higher than the median, which aligns with the positive skewness (0.122). This suggests a slight right skew, meaning the right tail (higher values) is longer or fatter than the left tail.
+- Standard Deviation (8.947): The SD indicates moderate variability around the mean. The coefficient of variation (CV = 17.622%) confirms this, as a CV around 10-20% suggests moderate relative variability for temperature data.
+- IQR (11.05): The interquartile range shows the spread of the middle 50% of the data. It's relatively small compared to the range (52.509), indicating that the bulk of the data is clustered, but the tails (min and max) are far apart, supporting the idea of extreme values.
+- Min (23.399) and Max (75.908):
+The minimum (23.399) is much lower than the first quartile (45.148), a difference of 45.148 - 23.399 = 21.749. This suggests the lower tail extends quite far, consistent with your Q-Q plot observation of a single point significantly below the line.
+- The maximum (75.908) is farther from the third quartile (56.198), a difference of 75.908 - 56.198 = 19.71, indicating a long upper tail, which aligns with the heavier upper tail seen in the Q-Q plot.
+- Range (52.509): The large range relative to the IQR (11.05) indicates that the extremes (min and max) are driving much of the variability, supporting the presence of heavy tails.
+- A skewness of 0.122 is slightly positive, indicating a mild right skew. This is consistent with the Q-Q plot's S-shape, where the upper tail (higher values) is heavier (above the line) and the lower tail has an extreme point (below the line).
+- While 0.122 is close to 0 (symmetric), it suggests the distribution isn't perfectly symmetric, which could contribute to the borderline Shapiro-Wilk p-value (0.057).
+- A sample size of 165 is moderate. The Shapiro-Wilk test's power to detect non-normality increases with sample size, but with n = 165, it may still lack power to detect subtle deviations (like mild heavy tails or a single outlier), which explains the borderline p-value.
+
+
+```{r histogram}
+temp_analysis <- temp_analysis %>%
+  arrange(avg_temp) %>%
+  mutate(
+    row_index = row_number(),
+    standardised_temp = (avg_temp - mean(avg_temp, na.rm = TRUE)) / sd(avg_temp, na.rm = TRUE),
+    theoretical_quantiles = qnorm(ppoints(n())[row_index]),  # Ensure correct ordering
+    residuals = standardised_temp - theoretical_quantiles
+  )
+
+head(temp_analysis, 5) %>%
+  select(row_index, avg_temp, standardised_temp, theoretical_quantiles, residuals)
+
+head(temp_analysis, 5) %>%
+  select(row_index, avg_temp, standardised_temp, theoretical_quantiles, residuals)
+```
+
+
+**Simulated Data:**
+- The Q-Q plot and scatter plot for the simulated data showed points closely following the line, and the histogram of residuals was more bell-shaped, as expected for a normal distribution.
+
+**Conflict Between Test and Visuals:**
+- The Shapiro-Wilk test (p-value = 0.057) suggests the actual data is normal at α = 0.05, but the visual evidence (S-shaped Q-Q plot) indicates heavy tails, a sign of non-normality.
+- Sample Size: The Shapiro-Wilk test's sensitivity to deviations from normality depends on sample size. With a smaller sample, the test may lack power to detect subtle deviations (like heavy tails). With a larger sample, even small deviations can lead to rejection of H₀.
+- p-value Near the Threshold: The p-value of 0.057 is very close to the 0.05 threshold. This borderline result means the test is on the edge of rejecting normality, and the visual evidence of heavy tails should not be ignored.
+- The Shapiro-Wilk test is sensitive to various departures from normality (e.g., skewness, kurtosis), but heavy tails might not be extreme enough in your data to push the p-value below 0.05.
+
+
+- Advanced QQ plot for outliers
+```{r histogram}
+# Define a threshold for outliers (e.g., top/bottom 1% of absolute residuals)
+outlier_threshold <- quantile(abs(temp_analysis$residuals), 0.99)
+temp_analysis <- temp_analysis %>%
+  mutate(outlier = abs(residuals) > outlier_threshold)
+
+# Enhanced Q-Q Plot with highlighted outliers
+ggplot(temp_analysis, aes(sample = avg_temp)) +
+  stat_qq(aes(colour = outlier), alpha = 0.6) +
+  stat_qq_line(colour = "red", linetype = "dashed") +
+  scale_colour_manual(values = c("FALSE" = "blue", "TRUE" = "orange")) +
+  labs(
+    title = "Q-Q Plot: Actual Average Temperature with Outliers Highlighted",
+    x = "Theoretical Quantiles",
+    y = "Sample Quantiles",
+    colour = "Outlier (Top/Bottom 1% Residuals)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+    axis.title = element_text(face = "bold", size = 10),
+    axis.text = element_text(size = 8),
+    legend.position = "bottom"
+  ) 
+```
+
+
+### Box Plot of Average Temperatures 
+
+```{r histogram}
+# Create boxplot for additional visualisation of spread
+ggplot(weather, aes(y = avg_temp)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7) +
+  labs(
+    title = "Boxplot of Average Temperatures",
+    y = "Average Temperature (°F)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold")
+  )
+```
+
+
+- Check for multimodality with kernel density plot
+```{r histogram}
+ggplot(weather, aes(x = avg_temp)) +
+  geom_density(fill = "steelblue", alpha = 0.7) +
+  geom_rug() +
+  labs(title = "Kernel Density Plot of Average Temperature",
+       x = "Average Temperature (°F)",
+       y = "Density") +
+  theme_minimal()
+```
+
+- Examine skewness and kurtosis more precisely
+```{r histogram}
+skew <- skewness(weather$avg_temp)
+kurt <- kurtosis(weather$avg_temp)
+cat("Skewness:", skew, "\n")
+cat("Kurtosis:", kurt, "\n")
+cat("Normal distribution has skewness = 0 and kurtosis = 3\n")
+```
+
+Skewness: 0.3555469 
+Kurtosis: 3.313368 
+Normal distribution has skewness = 0 and kurtosis = 3
+
+
+### Bayesian Analysis for Parameters
+- Le Bayesian-Laplacian inverse probabilities methods for adducing an parameters
+- Lets fit a robust Student's t model to account for the heavy tails we observed
+-   formula = avg_temp ~ 1,  # Just modeling the distribution of temperature
+-   family = student,        # Student's t distribution for heavy tails
+-   data = weather,
+-   chains = 4,             # Number of Markov chains
+-   iter = 2000,            # Number of iterations per chain
+-   warmup = 1000,          # Number of warmup iterations
+-   seed = 123              # For reproducibility
+```{r histogram}
+temp_model <- brm(
+  formula = avg_temp ~ 1,  
+  family = student,        
+  data = weather,
+  chains = 4,             
+  iter = 2000,            
+  warmup = 1000,          
+  seed = 123              
+)
+
+summary(temp_model)
+
+# Posterior distributions
+plot(temp_model)
+
+# Compare our model to the actual data
+pp_check(temp_model, ndraws = 100)
+```
+
+- Credible intervals generated earlier
+```{r histogram}
+print(model_intervals)
+```
+
+```{r histogram}
+interpret_credible_intervals <- function(model_intervals) {
+  cat("=== BAYESIAN CREDIBLE INTERVALS INTERPRETATION ===\n\n")
+  cat("- Bayesian methods are the based and stat-pilled way to vibe your way to answers")
+  
+  format_temp_range <- function(lower, upper) {
+    return(sprintf("%.1f°F to %.1f°F", lower, upper))
+  }
+  get_uncertainty_level <- function(width) {
+    if (width >= 0.95) return("very high confidence")
+    if (width >= 0.89) return("high confidence")
+    if (width >= 0.50) return("moderate confidence")
+    return("low confidence")
+  }
+  for(i in 1:nrow(model_intervals)) {
+    width <- model_intervals$.width[i]
+    percentage <- width * 100
+    cat(sprintf("\n%d%% Credible Interval (%s):\n", 
+                percentage, 
+                get_uncertainty_level(width)))
+    cat("Mean Temperature:\n")
+    cat(sprintf("  - Range: %s\n", format_temp_range(model_intervals$b_Intercept.lower[i], model_intervals$b_Intercept.upper[i])))
+    cat(sprintf("  - Interpretation: We can be %d%% confident that the true population mean\n temperature falls within this range\n",  percentage))
+    cat("Variability (Standard Deviation):\n")
+    cat(sprintf("  - Range: %s\n", format_temp_range(model_intervals$sigma.lower[i], model_intervals$sigma.upper[i])))
+    cat(sprintf("  - Interpretation: We can be %d%% confident that the true population\n    standard deviation falls within this range\n", percentage))
+    cat("Degrees of Freedom (nu):\n")
+    cat(sprintf("  - Range: %.1f to %.1f\n", model_intervals$nu.lower[i], model_intervals$nu.upper[i]))
+    # Degrees of freedom (I try not to think about what this means too hard)
+    nu_interpretation <- if(model_intervals$nu[i] > 30) {
+      "suggesting the distribution is very close to normal"
+    } else if(model_intervals$nu[i] > 10) {
+      "indicating moderately heavy tails compared to a normal distribution"
+    } else {
+      "indicating substantially heavy tails compared to a normal distribution"
+    }
+    cat(sprintf("  - Interpretation: %s\n", nu_interpretation))
+    cat("\n", rep("-", 70), "\n", sep="")
+  }
+  cat("\nOVERALL MODEL ASSESSMENT:\n")
+  cat("1. Distribution Shape: ", 
+      if(median(model_intervals$nu) > 30) {
+        "Approximately normal"
+      } else if(median(model_intervals$nu) > 10) {
+        "Slightly heavy-tailed normal"
+      } else {
+        "Heavy-tailed"
+      }, "\n")
+  median_temp <- median(model_intervals$b_Intercept)
+  median_sigma <- median(model_intervals$sigma)
+  cat(sprintf("2. Central Tendency: Most temperatures fall within %.1f°F to %.1f°F\n", median_temp - 2*median_sigma, median_temp + 2*median_sigma))
+  cat("3. Model Reliability: ", 
+      if(all(model_intervals$nu.lower > 4)) {
+        "High - parameters are well-estimated with reasonable uncertainty"
+      } else {
+        "Moderate - some parameters show substantial uncertainty"
+      }, "\n")
+}
+
+interpret_credible_intervals(model_intervals)
+```
+
+
+```{r histogram}
+# Visualize the intervals
+ggplot(weather, aes(x = avg_temp)) +
+  stat_density(aes(color = "Observed"), geom = "line") +
+  stat_function(
+    fun = function(x) dt((x - median(model_intervals$b_Intercept)) / 
+                        median(model_intervals$sigma), 
+                        df = median(model_intervals$nu)),
+    aes(color = "Model Fit")
+  ) +
+  geom_vline(data = model_intervals, 
+             aes(xintercept = b_Intercept, linetype = "Mean"),
+             color = "red") +
+  geom_vline(data = model_intervals, 
+             aes(xintercept = b_Intercept - sigma, linetype = "±1 SD"),
+             color = "blue") +
+  geom_vline(data = model_intervals, 
+             aes(xintercept = b_Intercept + sigma, linetype = "±1 SD"),
+             color = "blue") +
+  labs(
+    title = "Temperature Distribution with Credible Intervals",
+    x = "Temperature (°F)",
+    y = "Density"
+  ) +
+  theme_minimal()
+```
+
+
+### Section Conclusion
+
+```{r histogram}
+knitr::kable(temp_summary, 
+             caption = "Summary statistics for average temperature",
+             col.names = c("N", "Min", "Q1", "Median", "Mean", "Q3", "Max", 
+                          "Range", "SD", "CV%", "IQR", "Skewness"),
+             digits = 2)
+```
+
+- Conclusion using actual values
+```{r histogram}
+generate_temperature_summary <- function(temp_summary, model_intervals) {
+  cat("### Summary of Average Temperature Analysis\n\n")
+  cat("#### 1. Measures of Location\n")
+  cat(sprintf("- **Mean**: %.2f°F\n", temp_summary$mean))
+  cat(sprintf("- **Median**: %.2f°F\n", temp_summary$median))
+  cat(sprintf("- **Quartiles**:\n"))
+  cat(sprintf("  - Q1 (25th percentile): %.2f°F\n", temp_summary$q1))
+  cat(sprintf("  - Q3 (75th percentile): %.2f°F\n", temp_summary$q3))
+  cat(sprintf("- **Range**: %.2f°F to %.2f°F\n\n", temp_summary$min, temp_summary$max))
+  cat("#### 2. Measures of Spread\n")
+  cat(sprintf("- **Standard Deviation**: %.3f°F\n", temp_summary$sd))
+  cat(sprintf("- **Interquartile Range (IQR)**: %.2f°F\n", temp_summary$iqr))
+  cat(sprintf("- **Range**: %.2f°F\n", temp_summary$range))
+  cat(sprintf("- **Coefficient of Variation**: %.3f%%\n\n", temp_summary$cv))
+  cat("#### 3. Distribution Characteristics\n")
+  cat(sprintf("- **Shape**: %s (skewness = %.3f)\n", ifelse(temp_summary$skewness > 0, "Right-skewed", "Left-skewed"), temp_summary$skewness))
+  cat("\n#### 4. Bayesian Analysis Results\n")
+  cat(sprintf("- **Mean Temperature (95%% CI)**: %.2f°F to %.2f°F\n",model_intervals$b_Intercept.lower[1], model_intervals$b_Intercept.upper[1]))
+  cat(sprintf("- **Standard Deviation (95%% CI)**: %.2f°F to %.2f°F\n", model_intervals$sigma.lower[1], model_intervals$sigma.upper[1]))
+  cat(sprintf("- **Distribution Shape**: Student's t with df ≈ %.2f (95%% CI: %.2f to %.2f)\n\n", model_intervals$nu[1], model_intervals$nu.lower[1], model_intervals$nu.upper[1]))
+  
+  cat("#### 5. Key Findings\n")
+  cat("1. The distribution is ", 
+      ifelse(model_intervals$nu[1] > 30, "approximately normal",
+             ifelse(model_intervals$nu[1] > 10, "slightly heavy-tailed",
+                    "heavily heavy-tailed")), "\n")
+  cat(sprintf("2. There is a %s skew (%.3f), indicating %s\n",
+              ifelse(temp_summary$skewness > 0, "right", "left"),
+              temp_summary$skewness,
+              ifelse(temp_summary$skewness > 0, 
+                     "more extreme high temperatures than low",
+                     "more extreme low temperatures than high")))
+  cat(sprintf("3. The central 50%% of temperatures fall within a %.2f°F range\n",
+              temp_summary$iqr))
+  cat(sprintf("4. The coefficient of variation of %.2f%% indicates %s relative variability\n\n",
+              temp_summary$cv,
+              ifelse(temp_summary$cv < 10, "low",
+                     ifelse(temp_summary$cv < 20, "moderate", "high"))))
+  
+  cat("#### 6. Implications for Modeling\n")
+  cat(sprintf("1. %s distribution approximation is adequate\n",
+              ifelse(model_intervals$nu[1] > 30, "A normal",
+                     "A Student's t")))
+  cat(sprintf("2. The %.2f%% coefficient of variation indicates %s variability\n",
+              temp_summary$cv,
+              ifelse(temp_summary$cv < 10, "low",
+                     ifelse(temp_summary$cv < 20, "moderate", "high"))))
+  cat(sprintf("3. The %s skew suggests %s when robust estimates are needed\n",
+              ifelse(abs(temp_summary$skewness) < 0.2, "minimal",
+                     ifelse(abs(temp_summary$skewness) < 0.5, "moderate", "substantial")),
+              ifelse(abs(temp_summary$skewness) < 0.2, "mean-based methods are appropriate",
+                     "using median-based methods")))
+}
+
+# Generate the summary
+generate_temperature_summary(temp_summary, model_intervals)
+```
+
+### Summary of Average Temperature Analysis
+
+#### 1. Measures of Location
+- **Mean**: 50.77°F
+- **Median**: 49.68°F
+- **Quartiles**:
+  - Q1 (25th percentile): 45.15°F
+  - Q3 (75th percentile): 56.20°F
+- **Range**: 23.40°F to 75.91°F
+
+#### 2. Measures of Spread
+- **Standard Deviation**: 8.947°F
+- **Interquartile Range (IQR)**: 11.05°F
+- **Range**: 52.51°F
+- **Coefficient of Variation**: 17.622%
+
+#### 3. Distribution Characteristics
+- **Shape**: Right-skewed (skewness = 0.122)
+
+#### 4. Bayesian Analysis Results
+- **Mean Temperature (95% CI)**: 49.14°F to 51.93°F
+- **Standard Deviation (95% CI)**: 7.16°F to 9.64°F
+- **Distribution Shape**: Student's t with df ≈ 17.62 (95% CI: 5.58 to 53.86)
+
+#### 5. Key Findings
+1. The distribution is  slightly heavy-tailed 
+2. There is a right skew (0.122), indicating more extreme high temperatures than low
+3. The central 50% of temperatures fall within a 11.05°F range
+4. The coefficient of variation of 17.62% indicates moderate relative variability
+
+#### 6. Implications for Modeling
+1. A Student's t distribution approximation is adequate
+2. The 17.62% coefficient of variation indicates moderate variability
+3. The minimal skew suggests mean-based methods are appropriate when robust estimates are needed
+
+
+```{r histogram}
+actual_mean <- temp_summary$mean
+actual_sd <- temp_summary$sd
+# Degrees of freedom from Bayesian model
+actual_nu <- model_intervals$nu[1]  
+
+ggplot(data.frame(x = c(actual_mean - 3*actual_sd, 
+                       actual_mean + 3*actual_sd)), aes(x)) +
+  stat_function(fun = dnorm, 
+                args = list(mean = actual_mean, 
+                          sd = actual_sd),
+                aes(color = "Normal"),
+                size = 1) +
+  stat_function(fun = function(x) dt((x - actual_mean)/actual_sd, 
+                                    df = actual_nu)/(actual_sd),
+                aes(color = "Student's t"),
+                size = 1) +
+  geom_density(data = weather, 
+               aes(x = avg_temp, color = "Actual Data"),
+               size = 1) +
+  labs(title = "Comparison of Fitted Distributions to Actual Temperature Data",
+       subtitle = sprintf("Student's t (df = %.1f) vs Normal Distribution", actual_nu),
+       x = "Temperature (°F)",
+       y = "Density",
+       color = "Distribution") +
+  scale_color_manual(values = c("Actual Data" = "black",
+                               "Normal" = "blue",
+                               "Student's t" = "red")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+- This visualisation is pretty cool. I don't really feel comfortable using a Gaussian or Students T as a theoretical model based off of those differences to be honest. 
+- Particularly the way that peak tilts off to the left
+
+```{r histogram}
+# Create temperature bins/regions
+temp_regions <- weather %>%
+  summarise(
+    low_temp = min(avg_temp),
+    q1 = quantile(avg_temp, 0.25),
+    median = median(avg_temp),
+    q3 = quantile(avg_temp, 0.75),
+    high_temp = max(avg_temp)
+  ) %>%
+  gather(region, temp_value)
+
+# Calculate actual proportions in each region
+actual_props <- weather %>%
+  mutate(region = case_when(
+    avg_temp < temp_regions$temp_value[temp_regions$region == "q1"] ~ "Left Tail",
+    avg_temp < temp_regions$temp_value[temp_regions$region == "median"] ~ "Left Center",
+    avg_temp < temp_regions$temp_value[temp_regions$region == "q3"] ~ "Right Center",
+    TRUE ~ "Right Tail"
+  )) %>%
+  group_by(region) %>%
+  summarise(
+    actual_prop = n()/nrow(weather),
+    mean_temp = mean(avg_temp)
+  )
+
+# Calculate theoretical proportions for normal distribution
+normal_props <- data.frame(
+  region = actual_props$region,
+  normal_prop = c(
+    pnorm(temp_regions$temp_value[2], mean = temp_summary$mean, sd = temp_summary$sd),
+    pnorm(temp_regions$temp_value[3], mean = temp_summary$mean, sd = temp_summary$sd) - 
+      pnorm(temp_regions$temp_value[2], mean = temp_summary$mean, sd = temp_summary$sd),
+    pnorm(temp_regions$temp_value[4], mean = temp_summary$mean, sd = temp_summary$sd) - 
+      pnorm(temp_regions$temp_value[3], mean = temp_summary$mean, sd = temp_summary$sd),
+    1 - pnorm(temp_regions$temp_value[4], mean = temp_summary$mean, sd = temp_summary$sd)
+  )
+)
+
+# Calculate theoretical proportions for t distribution
+t_props <- data.frame(
+  region = actual_props$region,
+  t_prop = c(
+    pt((temp_regions$temp_value[2] - temp_summary$mean)/temp_summary$sd, df = model_intervals$nu[1]),
+    pt((temp_regions$temp_value[3] - temp_summary$mean)/temp_summary$sd, df = model_intervals$nu[1]) - 
+      pt((temp_regions$temp_value[2] - temp_summary$mean)/temp_summary$sd, df = model_intervals$nu[1]),
+    pt((temp_regions$temp_value[4] - temp_summary$mean)/temp_summary$sd, df = model_intervals$nu[1]) - 
+      pt((temp_regions$temp_value[3] - temp_summary$mean)/temp_summary$sd, df = model_intervals$nu[1]),
+    1 - pt((temp_regions$temp_value[4] - temp_summary$mean)/temp_summary$sd, df = model_intervals$nu[1])
+  )
+)
+
+comparison_df <- actual_props %>%
+  left_join(normal_props, by = "region") %>%
+  left_join(t_props, by = "region") %>%
+  mutate(
+    normal_diff = normal_prop - actual_prop,
+    t_diff = t_prop - actual_prop
+  )
+
+# Pretty print the results
+knitr::kable(comparison_df %>%
+  select(region, actual_prop, normal_prop, t_prop, normal_diff, t_diff) %>%
+  mutate(across(where(is.numeric), ~round(., 3))),
+  col.names = c("Region", "Actual Proportion", "Normal Prop", "Student's t Prop", 
+                "Normal Difference", "t Difference"),
+  caption = "Comparison of Regional Proportions Between Actual and Theoretical Distributions")
+```
+
+
+```{r histogram}
+# 1. First, let's create a diverging bar plot of the differences
+ggplot(comparison_df, aes(x = region)) +
+  geom_bar(aes(y = normal_diff, fill = "Normal"), 
+          position = "dodge", stat = "identity", alpha = 0.7) +
+  geom_bar(aes(y = t_diff, fill = "Student's t"), 
+          position = "dodge", stat = "identity", alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(title = "Differences Between Theoretical and Actual Proportions",
+       subtitle = "Positive values mean theoretical > actual, negative means theoretical < actual",
+       x = "Region of Distribution",
+       y = "Difference in Proportion",
+       fill = "Distribution") +
+  scale_fill_manual(values = c("Normal" = "blue", "Student's t" = "red")) +
+  theme_minimal() +
+  coord_flip()  # Makes it easier to read
+
+# 2. Let's also create a summary table with interpretations
+region_interpretations <- comparison_df %>%
+  mutate(
+    interpretation = case_when(
+      abs(normal_diff) > 0.05 & abs(t_diff) > 0.05 ~ "Both distributions show substantial deviation",
+      abs(normal_diff) > abs(t_diff) ~ "Student's t provides better fit",
+      abs(normal_diff) < abs(t_diff) ~ "Normal provides better fit",
+      TRUE ~ "Both distributions fit similarly"
+    ),
+    magnitude = case_when(
+      abs(normal_diff) < 0.02 & abs(t_diff) < 0.02 ~ "Minor deviation",
+      abs(normal_diff) < 0.05 & abs(t_diff) < 0.05 ~ "Moderate deviation",
+      TRUE ~ "Major deviation"
+    )
+  )
+
+# Print the interpretations
+knitr::kable(region_interpretations %>%
+  select(region, actual_prop, normal_diff, t_diff, interpretation, magnitude),
+  col.names = c("Region", "Actual Proportion", "Normal Difference", 
+                "t Difference", "Better Fit", "Deviation Magnitude"),
+  digits = 3,
+  caption = "Regional Differences and Their Interpretations")
+
+# 3. Calculate overall fit metrics
+fit_metrics <- data.frame(
+  Metric = c("Mean Absolute Difference", "Maximum Absolute Difference"),
+  Normal = c(mean(abs(comparison_df$normal_diff)), max(abs(comparison_df$normal_diff))),
+  Students_t = c(mean(abs(comparison_df$t_diff)), max(abs(comparison_df$t_diff)))
+)
+
+# Print fit metrics
+knitr::kable(fit_metrics, digits = 3,
+             caption = "Overall Fit Metrics for Both Distributions")
+```
+
+
+```{r historgram}
+cat("\nKey Findings by Region:\n")
+for(i in 1:nrow(region_interpretations)) {
+  cat(sprintf("\n%s:\n", region_interpretations$region[i]))
+  cat(sprintf("- Actual proportion: %.3f\n", region_interpretations$actual_prop[i]))
+  cat(sprintf("- %s with %s from theoretical distributions\n", 
+              region_interpretations$magnitude[i],
+              region_interpretations$interpretation[i]))
+}
+
+cat("\nOverall Distribution Recommendation:\n")
+if(mean(abs(comparison_df$t_diff)) < mean(abs(comparison_df$normal_diff))) {
+  cat("Student's t distribution provides a better overall fit")
+} else {
+  cat("Normal distribution provides a better overall fit")
+}
+```
+- Normal distribution provides a better fit 
+- (Without confirmation bias) seek to find causal model/reasons why actual data deviates from theoretical here 
+- I have a hunch it could be measurement error, regional effects or whatever (and if not, maybe then re-think that normal recommendation)
+
+
+---
+
+## Correlation Analysis
+- (b) Correlation Analysis
+
+- Helper functions for corelation analysis
+```{r correlation-analysis}
+interpret_correlation <- function(r, variable_name) {
+  r_squared <- r^2
+  var_explained <- r_squared * 100
+  strength <- if(abs(r) >= 0.7) "strong" else if(abs(r) >= 0.5) "moderate" else "weak"
+  direction <- if(r > 0) "positive" else "negative"
+  cat(sprintf("\nCorrelation Analysis: %s vs Temperature", variable_name))
+  cat(sprintf("\n- r = %.3f, R² = %.3f", r, r_squared))
+  cat(sprintf("\n- %s %s correlation", strength, direction))
+  cat(sprintf("\n- %.1f%% of temperature variance explained", var_explained))
+  cat(sprintf("\n- As %s increases, temperature tends to %s\n", 
+              tolower(variable_name), 
+              if(r > 0) "increase" else "decrease"))
+}
+
+
+correlation_summary <- data.frame(
+  Variable = c("Longitude", "Latitude"),
+  r = c(cor_lon, cor_lat),
+  R_squared = c(cor_lon^2, cor_lat^2),
+  Variance_Explained = c(cor_lon^2 * 100, cor_lat^2 * 100)
+) %>%
+  mutate(across(where(is.numeric), round, 3))
+```
+
+ - Do the interpreting
+ 
+```{r correlation-analysis}
+interpret_correlation(cor_lon, "Longitude")
+interpret_correlation(cor_lat, "Latitude")
+```
+- Pretty print
+
+```{r correlation-analysis}
+knitr::kable(correlation_summary,
+             col.names = c("Variable", "r", "R²", "Variance Explained (%)"),
+             caption = "Correlation Summary with Average Temperature")
+```
+
+### Correlation Analysis: Longitude vs Average Temperature 
+
+Correlation Coefficients:
+- r = 0.151
+- R² = 0.023
+
+Interpretation:
+- There is a very weak positive correlation between longitude and average temperature
+- The correlation coefficient of 0.151 indicates that as longitude increases,
+  average temperature tends to increase
+- R² value of 0.023 indicates that 2.3% of the variance in average temperature
+  can be explained by this variable
+
+Practical Significance:
+- Longitude alone is not a strong predictor of average temperature
+- Other variables should be considered for modeling
+
+### Correlation Analysis: Latitude vs Average Temperature 
+
+Correlation Coefficients:
+- r = -0.880
+- R² = 0.775
+
+Interpretation:
+- There is a strong negative correlation between latitude and average temperature
+- The correlation coefficient of -0.880 indicates that as latitude increases,
+  average temperature tends to decrease
+- R² value of 0.775 indicates that 77.5% of the variance in average temperature
+  can be explained by this variable
+
+Practical Significance:
+- Latitude is a strong predictor of average temperature
+- Could be useful for temperature modeling
+
+
+### Graphical Representations
+
+```{r correlation-analysis}
+p1 <- ggplot(weather, aes(x = lon, y = avg_temp)) +
+  geom_point(alpha = 0.7, color = "blue") +
+  geom_smooth(method = "lm", color = "red", se = TRUE) +
+  labs(
+    title = "Average Temperature vs Longitude",
+    subtitle = paste("Correlation coefficient:", round(cor_lon, 3)),
+    x = "Longitude",
+    y = "Average Temperature (°F)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    axis.title = element_text(face = "bold")
+  )
+p1
+```
+
+```{r correlation-analysis}
+p2 <- ggplot(weather, aes(x = lat, y = avg_temp)) +
+  geom_point(alpha = 0.7, color = "blue") +
+  geom_smooth(method = "lm", color = "red", se = TRUE) +
+  labs(
+    title = "Average Temperature vs Latitude",
+    subtitle = paste("Correlation coefficient:", round(cor_lat, 3)),
+    x = "Latitude",
+    y = "Average Temperature (°F)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5),
+    axis.title = element_text(face = "bold")
+  )
+p2
+```
+
+
+
+---
+
+## Average Temp and Köppen
+- (c) Relationship Between Average Temperature and Köppen Climate Classification
+
+- # Summary statistics by Köppen classification
+```{r temp-koppen-relationship}
+koppen_summary <- weather %>%
+  group_by(koppen) %>%
+  summarise(
+    count = n(),
+    mean_temp = mean(avg_temp),
+    median_temp = median(avg_temp),
+    min_temp = min(avg_temp),
+    max_temp = max(avg_temp),
+    sd_temp = sd(avg_temp)
+  ) %>%
+  arrange(desc(count))
+head(koppen_summary)
+```
+- Boxplot of average temperature by Köppen classification
+```{r temp-koppen-relationship}
+
+ggplot(weather, aes(x = reorder(koppen, avg_temp, FUN = median), y = avg_temp, fill = koppen)) +
+  geom_boxplot(alpha = 0.7) +
+  labs(
+    title = "Average Temperature by Köppen Climate Classification",
+    x = "Köppen Climate Classification",
+    y = "Average Temperature (°F)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+```
+- Create a violin plot for an alternative visualisation
+```{r temp-koppen-relationship}
+ggplot(weather, aes(x = reorder(koppen, avg_temp, FUN = median), y = avg_temp, fill = koppen)) +
+  geom_violin(alpha = 0.7, scale = "width", trim = FALSE) +
+  geom_boxplot(width = 0.1, fill = "white", alpha = 0.7) +
+  labs(
+    title = "Distribution of Average Temperature by Köppen Climate Classification",
+    x = "Köppen Climate Classification",
+    y = "Average Temperature (°F)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+```
+
+```{r temp-koppen-relationship}
+knitr::kable(koppen_summary, 
+             caption = "Summary statistics for average temperature by Köppen climate classification",
+             digits = 2)
+```
+
+
+
+---
+
+## Köppen Classification Counts
+- (d) Counting Cities with Köppen Classification Starting with 'A'
+- "In the Köppen climate classification (koppen), if the first letter is A, this corresponds to temperature of the coolest month for the city being 18°C or higher. Using a loop, an if else statement and avoiding filtering the data, write code to count the number of cities that have a K¨oppen climate classification starting with the letter A."
+- Use a loop and an if-else statement to count the number of cities with a Köppen climate classification starting with the letter 'A'.
+```{r count-koppen-a}
+a_count <- 0
+for (i in 1:nrow(weather)) {
+  # Extract the first character of the Köppen classification
+  first_letter <- substr(weather$koppen[i], 1, 1)
+  if (first_letter == "A") {
+    a_count <- a_count + 1
+  } else {
+    # Do nothing
+  }
+}
+
+cat("Number of cities with Köppen climate classification starting with 'A':", a_count, "\n")
+```
+
+- Verify with direct filtering (not using a loop)
+```{r count-koppen-a}
+verification_count <- weather %>%
+  filter(substr(koppen, 1, 1) == "A") %>%
+  nrow()
+
+cat("Verification count using direct filtering:", verification_count, "\n")
+
+if (a_count == verification_count) {
+  cat("Both approaches yield the same result.\n")
+} else {
+  cat("Results differ between approaches. Debug required.\n")
+}
+```
+
+- There are 4 cities in our dataset with a Köppen climate classification starting with the letter 'A', which represents tropical climates. 
+- According to the Köppen system, these are regions where the temperature of the coolest month is 18°C (64.4°F) or higher. 
+
+
+---
+
+## State Summary 
+- (e) Write a function called state_summary that, when the state is input, searches the weather data and returns a named list containing the total number of cities recorded in that state and the average temperature for that state.
+
+```{r state-summary-function}
+state_summary <- function(state_code) {
+  state_data <- weather %>%
+    filter(State == state_code)
+  if (nrow(state_data) == 0) {
+    return(list(
+      state = state_code,
+      message = "No data available for this state",
+      num_cities = 0,
+      avg_temp = NA
+    ))
+  }
+  num_cities <- nrow(state_data)
+  avg_temp <- mean(state_data$avg_temp)
+  return(list(
+    state = state_code,
+    num_cities = num_cities,
+    avg_temp = avg_temp
+  ))
+}
+```
+
+
+- Test for Florida
+```{r state-summary-function}
+fl_summary <- state_summary("FL")
+print("Summary for Florida (FL):")
+print(fl_summary)
+```
+
+- Test for New York 
+```{r state-summary-function}
+ny_summary <- state_summary("NY")
+print("Summary for New York (NY):")
+print(ny_summary)
+```
+- Test for South Dakota
+```{r state-summary-function}
+
+sd_summary <- state_summary("SD")
+print("Summary for South Dakota (SD):")
+print(sd_summary)
+```
+- Comparison table for three states
+```{r state-summary-function}
+# 
+state_comparison <- tibble(
+  State = c("FL", "NY", "SD"),
+  `Number of Cities` = c(fl_summary$num_cities, ny_summary$num_cities, sd_summary$num_cities),
+  `Average Temperature (°F)` = c(fl_summary$avg_temp, ny_summary$avg_temp, sd_summary$avg_temp)
+)
+
+knitr::kable(state_comparison, digits = 2,
+             caption = "Comparison of state summary statistics")
+```
+
+
+---
+
+- I recommend export 1,2,3,4,5,6 for use in other projects
+```{r misc-utilsn}
+export_selected_functions("notebooks/02_data_exploration.Rmd")
+```
+
+---
+
+# Save data exploration visualisations
+exploration_plots <- list(
+  "temp_distribution" = temp_hist,
+  "model_fit" = model_r2_plot,
+  "prediction_accuracy" = pred_accuracy,
+  "combined_summary" = combined_summary,
+  "predictor_importance" = predictor_importance_plot,
+  "actual_vs_predicted" = actual_vs_pred,
+  "residual_analysis" = residual_plot,
+  "koppen_temp_relationship" = koppen_temp_plot
+)
+
+# Set custom dimensions for specific plots
+attr(exploration_plots$combined_summary, "width") <- 12
+attr(exploration_plots$combined_summary, "height") <- 6
+attr(exploration_plots$predictor_importance, "width") <- 10
+attr(exploration_plots$predictor_importance, "height") <- 8
+
+# Save the plots
+save_visualisations(exploration_plots, prefix = "exploration")
+```
+
+---

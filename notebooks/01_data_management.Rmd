@@ -2,7 +2,10 @@
 title: "MM923 Data Analytics in R - Part 1: Data Management"
 author: "Nathan Ormond"
 date: "`r format(Sys.time(), '%d %B, %Y')`"
-output: 
+output:
+  pdf_document:
+    toc: true
+    toc_depth: '3'
   html_document:
     toc: true
     toc_float: true
@@ -21,6 +24,7 @@ This notebook contains code and documentation for cleaning and preparing the wea
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 # Set working directory to project root using relative path
 knitr::opts_knit$set(root.dir = here::here())
+source(here::here("R", "functions.R"))
 ```
 
 # Part 1: Data Management (20 marks)
@@ -44,19 +48,44 @@ load("data/raw/cities.RData")
 head(forecasts)
 head(cities)
 ```
+## Data Structure
+> Peeping inside the data sets:
 
-Examining the structure of the data sets: 
+### Forecasts
 
 ```{r examine-structure}
 str(forecasts)
-str(cities)
+```
+We can see that the `forecasts` dataset has the following columns:
+- `date`: Date of observed weather
+- `State_City`: State and city codes separated by a colon
+- `forecast_outlook`: Abbreviation for weather outlook
+- `possible_error`: Indicator for potential errors
+- `Measurement`: Type of weather measurement
+- `Response`: The measured value
 
+
+```{r examine-structure}
+str(cities)
+```
+
+The `cities` dataset contains geographical and climate information for cities, including:
+- `city` and `state`: Location identifiers
+- Geographical coordinates (`lon`, `lat`)
+- `elevation` and `distance_to_coast`: Physical characteristics
+- Climate classifications (columns 10-25, various [Köppen climate types](https://en.wikipedia.org/wiki/K%C3%B6ppen_climate_classification))
+
+
+```{r examine-structure}
 summary(forecasts)
+```
+
+```{r examine-structure}
 summary(cities)
 ```
 
 ## Cleaning Forecasts
-From assignment:
+Assignment:
 1. Create unique variables for State and City
 2. Make each level of Measurement have its own column with measure from Response
 3. Obtain only rows with accurate observed temp
@@ -64,49 +93,71 @@ From assignment:
 5. Calculate the average temperature of each city and store in a variable avg_temp rounded to 3 decimal places
 6. Retain only one row from each city in each state
 
+
+### Step 1: Unique vars for State and City
+- Create unique variables for State and City
+- Potential issue: The column is named "State_City" with an underscore
+
 ```{r clean-forecasts}
-# Step 1: Create unique variables for State and City
 forecasts_clean <- forecasts %>%
-  separate(col = `State City`, into = c("State", "City"), sep = ":")
+  separate(col = State_City, into = c("State", "City"), sep = ":")
 
-# Check the result of Step 1
 head(forecasts_clean)
+```
 
-# Step 2: Make each Measurement have its own column
+
+### Step 2: Restructure Measurement Data
+- # 2: Make each Measurement have its own column with values from Response
+- Potential property reference issue -- lookout as measurement types use underscores, e.g., "observed_temp"
+
+```{r forecasts-step2}
 forecasts_clean <- forecasts_clean %>%
   pivot_wider(names_from = Measurement, values_from = Response)
 
-# Check the result of Step 2
 head(forecasts_clean)
+```
 
-# Step 3: Obtain only rows with accurate observed temp
+### Step 3: Filter for Accurate Temperature Data
+- Obtain only rows with accurate observed temperature
+
+```{r forecasts-step3}
 forecasts_clean <- forecasts_clean %>%
-  filter(`possible error` == "none") %>%
-  filter(!is.na(`observed temp`))
+  filter(possible_error == "none") %>%
+  filter(!is.na(observed_temp))
 
-# Check the result of Step 3
 head(forecasts_clean)
+```
 
-# Step 4: Retain only information for the year 2021
+### Step 4: Filter for 2021 Data
+- Retain only information for the year 2021
+- Ensure date is correctly formatted before filtering
+
+```{r forecasts-step4}
 forecasts_clean <- forecasts_clean %>%
+  mutate(date = as.Date(date)) %>%
   filter(format(date, "%Y") == "2021")
 
-# Check the result of Step 4
 head(forecasts_clean)
 min(forecasts_clean$date)
 max(forecasts_clean$date)
+```
 
-# Step 5: Calculate average temperature rounded to 3 decimal places
+### Step 5: Calculate Average Temperature
+- Calculate average temperature for each city, rounded to 3 decimal places
+
+```{r forecasts-step5}
 forecasts_clean <- forecasts_clean %>%
   group_by(State, City) %>%
-  summarise(avg_temp = round(mean(`observed temp`, na.rm = TRUE), 3))
+  summarise(avg_temp = round(mean(observed_temp, na.rm = TRUE), 3), .groups = "drop")
 
-# Check the result of Step 5
 head(forecasts_clean)
+```
 
-# Step 6: Retain only one row from each city in each state
-# This is already done by the group_by and summarise operations
-# But we'll explicitly check for duplicates
+### Step 6: Check for Duplicate Entries
+- # Verify each city has only one row (unique)
+- Use `group_by` and `summarise` operations
+
+```{r forecasts-step6}
 duplicated_rows <- forecasts_clean %>%
   group_by(State, City) %>%
   filter(n() > 1)
@@ -115,108 +166,383 @@ print(paste("Number of duplicated State-City combinations:", nrow(duplicated_row
 ```
 
 ## Cleaning Cities 
-Assignment:
-1. Create a new variable called koppen which uses variable names from columns 10 to 25 as levels
-2. Store the responses in a variable called avg_annual_precip, dropping rows with missing values
-3. Combine with the tidy forecasts data retaining cities that appear in both datasets
-4. Retain only specific variables (State, City, lon, lat, koppen, elevation, distance to coast, wind, elevation change four, elevation change eight, avg_annual_precip, avg_temp)
-```{r clean-cities}
-# Step 1-2: Create koppen variable and avg_annual_precip
+> Whilst keeping council tax low
+
+
+###  Köppen Climate and Precipitation Variables
+- [Brittanica info on Koppen CLimate](https://www.britannica.com/science/Koppen-climate-classification) 
+- The Köppen system divides the Earth's climates into five major groups:
+  - A (Tropical): Regions where the temperature of the coolest month is 18°C or higher
+  - B (Dry): Areas where evaporation exceeds precipitation, further subdivided into BW (arid/desert) and BS (semi-arid/steppe)
+  - C (Temperate): Regions where the temperature of the warmest month exceeds 10°C and the coldest month is between 18°C and −3°C
+  - D (Continental): Areas where the temperature of the warmest month exceeds 10°C and the coldest month is −3°C or below
+  - E (Polar): Regions where the temperature of the warmest month is below 10°C
+
+- These main groups are further subdivided using additional letters that indicate precipitation patterns and temperature characteristics.
+
+#### Processing Köppen Climate Data in Our Dataset
+In our `cities` dataset, the Köppen climate types are represented as individual columns (positions 10-25), with each column name corresponding to a specific climate type (e.g., 'Cfa', 'BSk', 'Dfa'). The values in these columns represent the average annual precipitation for cities with that climate type.
+
+```{r cities-step1-2}
+# Peeping Köppen climate types 
+koppen_columns <- names(cities)[10:25]
+cat("Köppen climate types in our dataset:", "\n")
+print(koppen_columns)
+```
+
+
+```{r cities-step1-2}
+# Create koppen variable 
+# climate types as levels 
+# avg_annual_precip values
 cities_clean <- cities %>%
-  # Identify the Köppen climate columns (10-25)
-  pivot_longer(cols = names(cities)[10:25], 
+  # column names from positions 10-25 as levels
+  pivot_longer(cols = koppen_columns, 
                names_to = "koppen", 
                values_to = "avg_annual_precip") %>%
   # Drop rows with missing values in avg_annual_precip
-  filter(!is.na(avg_annual_precip)) %>%
-  # Create State and City variables matching forecasts
-  rename(State = state, City = city)
+  filter(!is.na(avg_annual_precip))
 
-# Check the result of Step 1-2
 head(cities_clean)
 ```
 
-## Combining Datasets
-Now we'll combine both cleaned datasets and keep only cities that appear in both.
 
-```{r combine-datasets}
-# Step 3: Combine the datasets keeping only cities in both
-weather_data <- inner_join(forecasts_clean, cities_clean, by = c("State", "City"))
+```{r cities-step1-2}
+koppen_distribution <- cities_clean %>%
+  count(koppen) %>%
+  arrange(desc(n))
 
-# Step 4: Retain only the specified variables
-weather_data <- weather_data %>%
-  select(State, City, lon, lat, koppen, elevation, `distance to coast`, 
-         wind, `elevation change four`, `elevation change eight`, 
-         avg_annual_precip, avg_temp)
-
-# Check the final dataset
-head(weather_data)
-dim(weather_data)
+print(koppen_distribution)
 ```
 
-## Validating Against Reference Data
+- Create a data frame with specific explanations for the Köppen types in our dataset
+- Why? Sometimes it's nice to make things understandable
+```{r cities-step1-2}
+koppen_reference <- tribble(
+  ~koppen, ~main_group, ~description,
+  "Af", "A", "Tropical rainforest - No dry season",
+  "Am", "A", "Tropical monsoon - Brief dry season",
+  "As", "A", "Tropical savanna - Dry summer",
+  "Aw", "A", "Tropical savanna - Dry winter",
+  "BWh", "B", "Hot desert climate",
+  "BWk", "B", "Cold desert climate",
+  "BSh", "B", "Hot semi-arid (steppe) climate",
+  "BSk", "B", "Cold semi-arid (steppe) climate",
+  "Cfa", "C", "Humid subtropical - No dry season, hot summer",
+  "Cfb", "C", "Oceanic - No dry season, warm summer",
+  "Cfc", "C", "Subpolar oceanic - No dry season, cool summer",
+  "Csa", "C", "Mediterranean - Dry summer, hot summer",
+  "Csb", "C", "Mediterranean - Dry summer, warm summer",
+  "Dfa", "D", "Humid continental - No dry season, hot summer",
+  "Dfb", "D", "Humid continental - No dry season, warm summer",
+  "Dfc", "D", "Subarctic - No dry season, cool summer"
+)
+print(koppen_reference)
+```
 
-```{r validate-data}
-# Load the reference data
-load("data/raw/weather.RData")
+- Joint with distribution data
+```{r cities-step1-2}
+koppen_summary <- koppen_distribution %>%
+  left_join(koppen_reference, by = "koppen") %>%
+  arrange(main_group, koppen)
 
-# Check if our cleaned data matches the reference data
-identical(weather_data, weather)
+print(koppen_summary)
+```
 
-# If not identical, investigate differences
-if(!identical(weather_data, weather)) {
-  # Check column names
-  cat("Column names match:", all.equal(names(weather_data), names(weather)), "\n")
+- For analysis in Part 2 of the assignment, we need to identify cities with a Köppen climate classification starting with 'A 
+- Add the main climate group to data in cleaning/prep phase
+
+```{r cities-step1-2}
+cities_clean <- cities_clean %>%
+  mutate(climate_group = substr(koppen, 1, 1))
+
+head(cities_clean)
+```
+- So we can see `climate_group` column added
+- Class 'A': According to the Köppen system, these cities have a temperature of the coolest month of 18°C or higher
+
+```{r cities-step1-2}
+# Print only climate group 'A' from the koppen summary
+koppen_summary %>% 
+  filter(main_group == "A") %>%
+  print()
+```
+
+- Count cities are in each main climate group
+```{r cities-step1-2}
+cities_clean %>%
+  count(climate_group) %>%
+  arrange(climate_group)
+
+```
+
+
+
+#### Notes on The `climate_group` variable 
+- Main uses: 
+  - Count cities in climate group 'A' using a loop and if-else statement (as required in Part 2d)
+  - Explore the relationship between avg_temp and koppen classifications (as required in Part 2c)
+  - Understand regional climate patterns that may influence our model in Part 3
+
+
+### Step 2: Prepare Cities Data for Joining
+
+```{r cities-step2}
+# Standardise column names to match with forecasts data
+cities_clean <- cities_clean %>%
+  rename(State = state, City = city)
+
+head(cities_clean)
+```
+
+## Combining the Datasets
+- We got data from two data sets
+- forecasts.RData - Contains weather observations with temperatures
+- cities.RData - Contains geographical and climate classification data
+- The aim of this section: combine both cleaned datasets and keep only cities that appear in both. 
+- We will use an inner_join() (Set intersection) to merges these two processed datasets to create the final weather_data dataset that contains only cities that appear in both datasets,
+- An inner join of sets $A$ and $B$ mathematically is represented as their intersection: 
+$A \cap B = \{ x \mid x \in A \land x \in B \land x \text{ satisfies the join condition} \}$.
+
+### Step 3: Join Datasets
+- NOTE: we can't simply do an inner join like `inner_join(forecasts_clean, cities_clean, by = c("State", "City"))` 
+- this would give us an `Error in inner_join(forecasts_clean, cities_clean, by = c("State", "City"))`
+- `✖ Problem with 'State' and 'City'`
+
+- BEFORE adding `climate_group`, make sure to rename the state/city columns
+- In the `cities_clean` dataset column names for the city and state are
+  - `city` (lowercase)
+  - `state` (lowercase)
+- In `forecasts_clean` dataset, column names:
+  - State (uppercase S)
+  - City (uppercase C)
   
-  # Check dimensions
-  cat("Dimensions match:", all.equal(dim(weather_data), dim(weather)), "\n")
   
-  # If dimensions don't match, investigate which cities might be missing
-  if(!identical(dim(weather_data), dim(weather))) {
-    # Check difference in rows
-    cat("Number of rows in our data:", nrow(weather_data), "\n")
-    cat("Number of rows in reference data:", nrow(weather), "\n")
-    
-    # Compare city sets
-    our_cities <- paste(weather_data$State, weather_data$City, sep="-")
-    ref_cities <- paste(weather$State, weather$City, sep="-")
-    
-    cat("Cities in reference but not in our data:", "\n")
-    print(setdiff(ref_cities, our_cities))
-    
-    cat("Cities in our data but not in reference:", "\n")
-    print(setdiff(our_cities, ref_cities))
-  }
-  
-  # Check a sample of values to see if there are numeric differences
-  cat("First 5 rows of our data:", "\n")
-  print(head(weather_data, 5))
-  
-  cat("First 5 rows of reference data:", "\n")
-  print(head(weather, 5))
+```{r cities-step2}
+cat("Column names in forecasts_clean:", "\n")
+print(names(forecasts_clean))
+cat("\nColumn names in cities_clean:", "\n")
+print(names(cities_clean))
+
+# We have the capitalised properties here
+cat("State and City in forecasts_clean", "\n")
+print(c("State", "City") %in% names(forecasts_clean))
+
+cat("State and City in cities_clean", "\n")
+print(c("State", "City") %in% names(cities_clean))
+```
+- So we need to modify the column names
+> NOTE: We're going to go UPPER CASE so `State` and `City` are our properties to use
+
+
+
+
+#### Clean Cities Mutation
+- Use column names from positions 10-25 as levels: `pivot_longer(cols = names(cities)[10:25]`
+- Drop rows with missing values in avg_annual_precip `filter(!is.na(avg_annual_precip))`
+- IMPORTANT: Rename state/city columns BEFORE adding climate_group `rename(State = state, City = city)`
+- Add climate group afterward `mutate(climate_group = substr(koppen, 1, 1))`
+
+```{r combine-step3}
+# Create koppen variable with climate types as levels and avg_annual_precip values
+cities_clean <- cities %>%
+  pivot_longer(cols = names(cities)[10:25], 
+               names_to = "koppen", 
+               values_to = "avg_annual_precip") %>%
+  filter(!is.na(avg_annual_precip)) %>%
+  rename(State = state, City = city) %>%
+  mutate(climate_group = substr(koppen, 1, 1))
+print("Cleaning complete")
+```
+
+
+#### Clean forecasts Mutation
+- Create unique variables for State and City
+- Make each level of Measurement have its own column with measure from Response
+- Obtain only rows with accurate observed temp
+- Retain only information for the year 2021
+- Calculate the average temperature rounded to 3 decimal places
+- Retain only one row from each city in each state (via the summarise)
+
+```{r combine-step3}
+forecasts_clean <- forecasts %>%
+  separate(col = State_City, into = c("State", "City"), sep = ":") %>%
+  pivot_wider(names_from = Measurement, values_from = Response) %>%
+  filter(possible_error == "none", !is.na(observed_temp)) %>%
+  mutate(date = as.Date(date)) %>%
+  filter(format(date, "%Y") == "2021") %>%
+  group_by(State, City) %>%
+  summarise(avg_temp = round(mean(observed_temp, na.rm = TRUE), 3), .groups = "drop")
+print("Cleaning complete")
+```
+
+
+### Clean Weather Data 
+- Join with explicit sorting to match reference dataset
+- The arrange(State, City) step is critical when comparing datasets with `identical()` because comparison requires exact positional matching of elements. 
+- Mathematically, datasets $A$ and $B$ are identical if and only if $\forall i: A_i = B_i$ 
+- i.e. Each element at position $i$ must match. 
+- Sorting creates a deterministic order (first by `State`, then by `City`) ensuring rows align properly between your dataset and the reference.
+
+```{r combine-step3}
+weather_data <- inner_join(forecasts_clean, cities_clean, by = c("State", "City")) %>%
+  select(State, City, lon, lat, koppen, elevation, distance_to_coast, 
+         wind, elevation_change_four, elevation_change_eight, 
+         avg_annual_precip, avg_temp) %>%
+  arrange(State, City)  # Sort just like the reference dataset might be sorted
+print("Clean weather_data produced")
+```
+
+### Step 4: Validate cleaned data
+
+```{r combine-step3}
+cat("Cleaned processed dataset dimensions:", dim(weather_data)[1], "rows by", dim(weather_data)[2], "columns\n")
+cat("Original dataset dimensions:", dim(weather)[1], "rows by", dim(weather)[2], "columns\n")
+```
+
+```{r combine-step3}
+# Count unique State-City combinations in both datasets
+cat("Unique State-City combinations in cleaned dataset:", 
+    weather_data %>% distinct(State, City) %>% nrow(), "\n")
+cat("Unique State-City combinations in original dataset:", 
+    weather %>% distinct(State, City) %>% nrow(), "\n")
+```
+
+```{r combine-step3}
+required_cols <- c("State", "City", "lon", "lat", "koppen", "elevation", 
+                  "distance_to_coast", "wind", "elevation_change_four", 
+                  "elevation_change_eight", "avg_annual_precip", "avg_temp")
+
+missing_cols <- setdiff(required_cols, names(weather_data))
+cat("Missing required columns in cleaned dataset:", 
+    ifelse(length(missing_cols) == 0, "None", paste(missing_cols, collapse=", ")), "\n")
+
+extra_cols <- setdiff(names(weather_data), required_cols)
+cat("Extra columns in cleaned dataset:", 
+    ifelse(length(extra_cols) == 0, "None", paste(extra_cols, collapse=", ")), "\n")
+
+```
+
+- Check if the city and state combinations match betwen the unprocessed and clean data
+- 0 differences is GOOD
+```{r combine-step3}
+origin_combos <- paste(weather$State, weather$City, sep="-")
+cleaned_combos <- paste(weather_data$State, weather_data$City, sep="-")
+raw_unique <- setdiff(origin_combos, cleaned_combos)
+cleaned_unique <- setdiff(cleaned_combos, origin_combos)
+
+print(length(raw_unique))
+print(head(cleaned_unique))
+print(length(raw_unique))
+print(head(cleaned_unique))
+```
+
+- Peep values -- Integrity check (i.e. verify nothing super weird like 0xFF or 1.8683 (which would be super sus for what we expect))
+```{r combine-step3}
+cat("\nFirst few entries in State column:\n")
+head(cities_clean$State)
+
+cat("\nFirst few entries in City column:\n")
+head(cities_clean$City)
+```
+
+- Check for dirty data
+```{r combine-step3}
+na_count <- weather_data %>% 
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "Column", values_to = "NA_Count") %>%
+  filter(NA_Count > 0)
+
+if(nrow(na_count) > 0) {
+  print("Columns with NA values:")
+  print(na_count)
+} else {
+  cat("No NA values found in clean dataset\n")
 }
 ```
 
-## Saving Clean Data
-```{r save-data}
-# Save the cleaned data
-saveRDS(weather_data, "data/processed/weather_clean.rds")
 
-# Also save as RData for consistency with the original format
-weather <- weather_data  # Create an object with the expected name
+## Persisting Cleaned Data 
+- Save cleaned data for future use
+- Create a processed data dir if not exists
+```{r save-data}
+if(!dir.exists("data/processed")) {
+  dir.create("data/processed", recursive = TRUE)
+}
+```
+
+- Save as `.rds` file
+- Stores a single R object (unlike .RData which can store multiple objects)
+- Preserves the object's structure, classes, and attributes
+- Creates more compact files than some other formats
+```{r save-data}
+saveRDS(weather_data, "data/processed/weather_clean.rds")
+```
+
+- Also save as RData for consistency with the original format
+```{r save-data}
+weather <- weather_data 
 save(weather, file = "data/processed/weather.RData")
+print("Saved cleaned data to data/processed/weather_clean.rds and data/processed/weather.RData\n")
 ```
 
 ## Summary
+1. Loaded the raw forecasts and cities data
+2. Cleaned the forecasts data:
+   - Separated State and City from State_City
+   - Reshaped the data to have measurement types as columns
+   - Filtered for accurate observed temperature readings
+   - Retained only 2021 data
+   - Calculated average temperatures by city
+   - Ensured one row per city per state
 
-Completed
-1. [x] Loaded the raw forecasts and cities data
-2. [ ] Cleaned the forecasts data according to specifications
-3. [ ] Cleaned the cities data according to specifications
-4. [ ] Combined the datasets and retained only necessary variables
-5. [ ] Validated our cleaned data against the reference data
-6. [ ] Saved the cleaned data for use in subsequent analyses
+3. Cleaned the cities data:
+   - Created koppen climate classification variable
+   - Stored precipitation values and removed missing data
+   - Standardised column names for joining
 
-The resulting dataset contains weather information for US cities, including average temperature, geographical information, and climate classifications.
+4. Combined the datasets:
+   - Joined on State and City
+   - Selected only the required variables
 
+5. Validated our cleaned data against the reference data
+
+6. Saved the cleaned data for use in subsequent analyses
+
+> The resulting dataset contains weather information for US cities, including average temperature, geographical information, and climate classifications, ready for exploration in Part 2.
+
+# Save data management visualisations
+data_management_plots <- list(
+  "data_quality_summary" = ggplot(weather, aes(x = avg_temp)) +
+    geom_histogram(bins = 30, fill = "steelblue") +
+    labs(title = "Distribution of Average Temperatures",
+         x = "Average Temperature (°F)",
+         y = "Count") +
+    theme_minimal(),
+  
+  "missing_data_heatmap" = weather %>%
+    is.na() %>%
+    reshape2::melt() %>%
+    ggplot(aes(x = Var2, y = Var1)) +
+    geom_tile(aes(fill = value)) +
+    labs(title = "Missing Data Heatmap") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)),
+  
+  "koppen_distribution" = ggplot(weather, aes(x = koppen)) +
+    geom_bar(fill = "steelblue") +
+    labs(title = "Distribution of Köppen Climate Classifications",
+         x = "Köppen Classification",
+         y = "Count") +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+)
+
+# Set custom dimensions for specific plots
+attr(data_management_plots$missing_data_heatmap, "width") <- 12
+attr(data_management_plots$missing_data_heatmap, "height") <- 8
+
+# Save the plots
+save_visualisations(data_management_plots, prefix = "data_management")
+```
 
