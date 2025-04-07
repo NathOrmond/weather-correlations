@@ -1,0 +1,3104 @@
+---
+title: "MM923 Data Analytics in R"
+author: "Nathan Ormond"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: '3'
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: united
+    highlight: tango
+    code_folding: show
+    df_print: paged
+---
+
+# MM923 Data Analytics in R 
+
+
+NOTE: This project was developed in a project with the following strucutre. 
+It was only after this that I realised the requirements on the submission are 
+"submit a single R script/R Markdown/Quarto document file containing 
+the code for each question, appropriately labelled."
+So there may be assumptions about WHERE data exists for imports and exports 
+of data. 
+
+Also - utility functions were in functions.R but I have included them 
+in this mega file.
+
+.
+├── R
+│   ├── functions.R
+│   └── scripts
+│       └── install_dependencies.R
+├── README.md
+├── data
+│   ├── processed
+│   │   ├── final_model.rds
+│   │   ├── weather.RData
+│   │   └── weather_clean.rds
+│   └── raw
+│       ├── cities.RData
+│       ├── forecasts.RData
+│       └── weather.RData
+├── mm923.Rproj
+├── notebooks
+│   ├── 01_data_management.Rmd
+│   ├── 02_data_exploration.Rmd
+│   ├── 03_model_building.Rmd
+│   ├── 04_summary_report.Rmd
+│   └── combined.Rmd
+└── outputs
+    ├── data_management_data_quality_summary.png
+    ├── data_management_koppen_distribution.png
+    ├── data_management_missing_data_heatmap.png
+    ├── exploration_bayesian_intervals.png
+    ├── exploration_bayesian_posterior.png
+    ├── exploration_distribution_comparison.png
+    ├── exploration_koppen_violin.png
+    ├── exploration_posterior_predictive.png
+    ├── exploration_qq_plots.png
+    ├── exploration_residual_histograms.png
+    ├── exploration_scatter_plots.png
+    ├── exploration_temp_distribution.png
+    ├── florida_location_analysis.png
+    ├── ohio_location_analysis.png
+    ├── posterior_density_plots.png
+    ├── posterior_parameter_estimates.png
+    ├── posterior_posterior_distributions.png
+    ├── posterior_posterior_predictive.png
+    ├── posterior_trace_plots.png
+    ├── springfield_prediction.png
+    └── us_coastal_inland_map.png
+
+8 directories, 36 files
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+# Set working directory to project root using relative path
+knitr::opts_knit$set(root.dir = here::here())
+```
+
+- misc functions
+
+```{r}
+# Weather Analysis Functions
+
+save_visualisations <- function(plots, base_dir = "outputs", prefix = "", width = 10, height = 8, dpi = 300) {
+  dir.create(here::here(base_dir), showWarnings = FALSE)
+  if (!is.list(plots)) {
+    plots <- list(plots)
+  }
+  for (plot_name in names(plots)) {
+    filename <- file.path(base_dir, paste0(prefix, "_", plot_name, ".png"))
+    w <- if (!is.null(attr(plots[[plot_name]], "width"))) attr(plots[[plot_name]], "width") else width
+    h <- if (!is.null(attr(plots[[plot_name]], "height"))) attr(plots[[plot_name]], "height") else height
+    d <- if (!is.null(attr(plots[[plot_name]], "dpi"))) attr(plots[[plot_name]], "dpi") else dpi
+    
+    png(filename = here::here(filename), width = w, height = h, units = "in", res = d)
+    
+    tryCatch({
+      if (inherits(plots[[plot_name]], "ggplot")) {
+        print(plots[[plot_name]])
+      } else if (inherits(plots[[plot_name]], "gtable") || 
+                inherits(plots[[plot_name]], "grob") ||
+                inherits(plots[[plot_name]], "arrangelist")) {
+        grid::grid.draw(plots[[plot_name]])
+      } else if (inherits(plots[[plot_name]], "brmsfit")) {
+        # Handle brms model objects
+        plot(plots[[plot_name]])
+      } else if (inherits(plots[[plot_name]], "bayesplot")) {
+        # Handle bayesplot objects (posterior plots)
+        print(plots[[plot_name]])
+      } else if (inherits(plots[[plot_name]], "mcmc.list") || 
+                inherits(plots[[plot_name]], "mcmc")) {
+        # Handle MCMC objects
+        plot(plots[[plot_name]])
+      } else {
+        print(plots[[plot_name]])
+      }
+    }, error = function(e) {
+      warning(sprintf("Failed to save plot %s: %s", plot_name, e$message))
+    }, finally = {
+      dev.off()
+    })
+  }
+  cat("All visualisations have been saved to the", base_dir, "directory\n")
+}
+
+interpret_correlation <- function(r, variable_name) {
+  r_squared <- r^2
+  var_explained <- r_squared * 100
+  strength <- if(abs(r) >= 0.7) "strong" else if(abs(r) >= 0.5) "moderate" else "weak"
+  direction <- if(r > 0) "positive" else "negative"
+  
+  cat(sprintf("\nCorrelation Analysis: %s vs Temperature", variable_name))
+  cat(sprintf("\n- r = %.3f, R² = %.3f", r, r_squared))
+  cat(sprintf("\n- %s %s correlation", strength, direction))
+  cat(sprintf("\n- %.1f%% of temperature variance explained", var_explained))
+  cat(sprintf("\n- As %s increases, temperature tends to %s\n", 
+              tolower(variable_name), 
+              if(r > 0) "increase" else "decrease"))
+}
+
+state_summary <- function(state_code) {
+  if (!requireNamespace("dplyr", quietly = TRUE)) {
+    stop("dplyr package is required for this function")
+  }
+  
+  state_data <- dplyr::filter(weather, State == state_code)
+  
+  if (nrow(state_data) == 0) {
+    return(list(
+      state = state_code,
+      message = "No data available for this state",
+      num_cities = 0,
+      avg_temp = NA
+    ))
+  }
+  
+  num_cities <- nrow(state_data)
+  avg_temp <- mean(state_data$avg_temp)
+  
+  return(list(
+    state = state_code,
+    num_cities = num_cities,
+    avg_temp = avg_temp
+  ))
+}
+
+f_test_data_dredger <- function(model_summary, alpha) {
+  # Calculate p-value from F-statistic
+  p_value <- pf(model_summary$fstatistic[1], 
+                model_summary$fstatistic[2], 
+                model_summary$fstatistic[3], 
+                lower.tail = FALSE)
+  if (p_value < alpha) {
+    result <- paste("The overall model is statistically significant at the", alpha, "level.")
+    result <- paste(result, "We reject the null hypothesis that all coefficients equal zero.")
+  } else {
+    result <- paste("The overall model is not statistically significant at the", alpha, "level.")
+    result <- paste(result, "We fail to reject the null hypothesis that all coefficients equal zero.")
+  }
+  return(result)
+} 
+
+model_info <- function(model, name) {
+  data.frame(
+    Model = name,
+    Variables = paste(names(coef(model))[-1], collapse = ", "), # Exclude intercept
+    R_squared = summary(model)$r.squared,
+    Adj_R_squared = summary(model)$adj.r.squared,
+    AIC = AIC(model),
+    BIC = BIC(model)
+  )
+} 
+
+cv_rmse <- function(model, data, k = 5) {
+  set.seed(123)  # For reproducibility
+  folds <- cut(seq(1, nrow(data)), breaks = k, labels = FALSE)
+  cv_errors <- numeric(k)
+  for (i in 1:k) {
+    test_indices <- which(folds == i)
+    train_data <- data[-test_indices, ]
+    test_data <- data[test_indices, ]
+    model_formula <- formula(model)
+    train_model <- lm(model_formula, data = train_data)
+    predictions <- predict(train_model, newdata = test_data)
+    cv_errors[i] <- sqrt(mean((test_data$avg_temp - predictions)^2))
+  }
+  return(mean(cv_errors))
+} 
+
+calculate_diagnostics <- function(model, model_name) {
+  model_summary <- summary(model)
+  sw_test <- shapiro.test(residuals(model))
+  bp_test <- bptest(model)
+  rmse <- sqrt(mean(residuals(model)^2))
+  mae <- mean(abs(residuals(model)))
+  data.frame(
+    Model = model_name,
+    Adj_R_squared = model_summary$adj.r.squared,
+    RSE = model_summary$sigma,
+    AIC = AIC(model),
+    Shapiro_W = sw_test$statistic,
+    Shapiro_p = sw_test$p.value,
+    BP_stat = bp_test$statistic,
+    BP_p = bp_test$p.value,
+    RMSE = rmse,
+    MAE = mae
+  )
+}
+```
+
+- Dependencies (Only run if you're missing a library)
+install.packages("tidyverse")
+install.packages("ggplot2")
+install.packages("usmap")
+install.packages("sf")
+install.packages("lmtest")
+install.packages("car")
+install.packages("here")
+install.packages("moments")
+install.packages("brms")
+install.packages("tidybayes")
+install.packages("patchwork")
+install.packages("gridExtra")
+install.packages("dplyr")
+install.packages("bayesplot")
+install.packages("sn")
+install.packages("MASS")
+
+```{r}
+# All unique libararies
+library(tidyverse)
+library(ggplot2)
+library(usmap)
+library(sf)
+library(lmtest)
+library(car)
+library(here)
+library(moments)
+library(brms)
+library(tidybayes)
+library(patchwork)
+library(gridExtra)
+library(dplyr)
+library(bayesplot)
+library(sn)
+library(MASS)
+
+# Seed for reproducibility
+set.seed(123)
+```
+
+# Part 1: Data Management
+
+## Raw Data
+
+- ASSUMPTION: raw data is in this location
+
+```{r load-data}
+load("data/raw/forecasts.RData")
+load("data/raw/cities.RData")
+head(forecasts)
+head(cities)
+```
+
+### Forecasts
+
+```{r examine-structure-forecasts}
+str(forecasts)
+```
+We can see that the `forecasts` dataset has the following columns:
+- `date`: Date of observed weather
+- `State_City`: State and city codes separated by a colon
+- `forecast_outlook`: Abbreviation for weather outlook
+- `possible_error`: Indicator for potential errors
+- `Measurement`: Type of weather measurement
+- `Response`: The measured value
+
+
+```{r examine-structure-cities}
+str(cities)
+```
+
+The `cities` dataset contains geographical and climate information for cities, including:
+- `city` and `state`: Location identifiers
+- Geographical coordinates (`lon`, `lat`)
+- `elevation` and `distance_to_coast`: Physical characteristics
+- Climate classifications (columns 10-25, various [Köppen climate types](https://en.wikipedia.org/wiki/K%C3%B6ppen_climate_classification))
+
+
+```{r examine-summary-forecasts}
+summary(forecasts)
+```
+
+```{r examine-summary-cities}
+summary(cities)
+```
+
+## Cleaning Forecasts
+Assignment:
+1. Create unique variables for State and City
+2. Make each level of Measurement have its own column with measure from Response
+3. Obtain only rows with accurate observed temp
+4. Retain only information for the year 2021
+5. Calculate the average temperature of each city and store in a variable avg_temp rounded to 3 decimal places
+6. Retain only one row from each city in each state
+
+
+### Step 1: Unique vars for State and City
+- Create unique variables for State and City
+- Potential issue: The column is named "State_City" with an underscore
+
+```{r clean-forecasts}
+forecasts_clean <- forecasts %>%
+  separate(col = State_City, into = c("State", "City"), sep = ":")
+
+head(forecasts_clean)
+```
+
+
+### Step 2: Restructure Measurement Data
+- # 2: Make each Measurement have its own column with values from Response
+- Potential property reference issue -- lookout as measurement types use underscores, e.g., "observed_temp"
+
+```{r forecasts-step2}
+forecasts_clean <- forecasts_clean %>%
+  pivot_wider(names_from = Measurement, values_from = Response)
+
+head(forecasts_clean)
+```
+
+### Step 3: Filter for Accurate Temperature Data
+- Obtain only rows with accurate observed temperature
+
+```{r forecasts-step3}
+forecasts_clean <- forecasts_clean %>%
+  filter(possible_error == "none") %>%
+  filter(!is.na(observed_temp))
+
+head(forecasts_clean)
+```
+
+### Step 4: Filter for 2021 Data
+- Retain only information for the year 2021
+- Ensure date is correctly formatted before filtering
+
+```{r forecasts-step4}
+forecasts_clean <- forecasts_clean %>%
+  mutate(date = as.Date(date)) %>%
+  filter(format(date, "%Y") == "2021")
+
+head(forecasts_clean)
+min(forecasts_clean$date)
+max(forecasts_clean$date)
+```
+
+### Step 5: Calculate Average Temperature
+- Calculate average temperature for each city, rounded to 3 decimal places
+
+```{r forecasts-step5}
+forecasts_clean <- forecasts_clean %>%
+  group_by(State, City) %>%
+  summarise(avg_temp = round(mean(observed_temp, na.rm = TRUE), 3), .groups = "drop")
+
+head(forecasts_clean)
+```
+
+### Step 6: Check for Duplicate Entries
+- # Verify each city has only one row (unique)
+- Use `group_by` and `summarise` operations
+
+```{r forecasts-step6}
+duplicated_rows <- forecasts_clean %>%
+  group_by(State, City) %>%
+  filter(n() > 1)
+
+print(paste("Number of duplicated State-City combinations:", nrow(duplicated_rows)))
+```
+
+## Cleaning Cities 
+> Whilst keeping council tax low
+
+
+###  Köppen Climate and Precipitation Variables
+- [Brittanica info on Koppen CLimate](https://www.britannica.com/science/Koppen-climate-classification) 
+- The Köppen system divides the Earth's climates into five major groups:
+  - A (Tropical): Regions where the temperature of the coolest month is 18°C or higher
+  - B (Dry): Areas where evaporation exceeds precipitation, further subdivided into BW (arid/desert) and BS (semi-arid/steppe)
+  - C (Temperate): Regions where the temperature of the warmest month exceeds 10°C and the coldest month is between 18°C and −3°C
+  - D (Continental): Areas where the temperature of the warmest month exceeds 10°C and the coldest month is −3°C or below
+  - E (Polar): Regions where the temperature of the warmest month is below 10°C
+
+- These main groups are further subdivided using additional letters that indicate precipitation patterns and temperature characteristics.
+
+#### Processing Köppen Climate Data in Our Dataset
+In our `cities` dataset, the Köppen climate types are represented as individual columns (positions 10-25), with each column name corresponding to a specific climate type (e.g., 'Cfa', 'BSk', 'Dfa'). The values in these columns represent the average annual precipitation for cities with that climate type.
+
+```{r koppen-types}
+# Peeping Köppen climate types 
+koppen_columns <- names(cities)[10:25]
+cat("Köppen climate types in our dataset:", "\n")
+print(koppen_columns)
+```
+
+```{r koppen-data-creation}
+# Create koppen variable 
+# climate types as levels 
+# avg_annual_precip values
+cities_clean <- cities %>%
+  # column names from positions 10-25 as levels
+  pivot_longer(cols = koppen_columns, 
+               names_to = "koppen", 
+               values_to = "avg_annual_precip") %>%
+  # Drop rows with missing values in avg_annual_precip
+  filter(!is.na(avg_annual_precip))
+
+head(cities_clean)
+```
+
+```{r koppen-distribution}
+koppen_distribution <- cities_clean %>%
+  count(koppen) %>%
+  arrange(desc(n))
+
+print(koppen_distribution)
+```
+
+- Create a data frame with specific explanations for the Köppen types in our dataset
+- Why? Sometimes it's nice to make things understandable
+```{r koppen-reference}
+koppen_reference <- tribble(
+  ~koppen, ~main_group, ~description,
+  "Af", "A", "Tropical rainforest - No dry season",
+  "Am", "A", "Tropical monsoon - Brief dry season",
+  "As", "A", "Tropical savanna - Dry summer",
+  "Aw", "A", "Tropical savanna - Dry winter",
+  "BWh", "B", "Hot desert climate",
+  "BWk", "B", "Cold desert climate",
+  "BSh", "B", "Hot semi-arid (steppe) climate",
+  "BSk", "B", "Cold semi-arid (steppe) climate",
+  "Cfa", "C", "Humid subtropical - No dry season, hot summer",
+  "Cfb", "C", "Oceanic - No dry season, warm summer",
+  "Cfc", "C", "Subpolar oceanic - No dry season, cool summer",
+  "Csa", "C", "Mediterranean - Dry summer, hot summer",
+  "Csb", "C", "Mediterranean - Dry summer, warm summer",
+  "Dfa", "D", "Humid continental - No dry season, hot summer",
+  "Dfb", "D", "Humid continental - No dry season, warm summer",
+  "Dfc", "D", "Subarctic - No dry season, cool summer"
+)
+print(koppen_reference)
+```
+
+- Joint with distribution data
+```{r koppen-summary}
+koppen_summary <- koppen_distribution %>%
+  left_join(koppen_reference, by = "koppen") %>%
+  arrange(main_group, koppen)
+
+print(koppen_summary)
+```
+
+- For analysis in Part 2 of the assignment, we need to identify cities with a Köppen climate classification starting with 'A 
+- Add the main climate group to data in cleaning/prep phase
+
+```{r climate-group-addition}
+cities_clean <- cities_clean %>%
+  mutate(climate_group = substr(koppen, 1, 1))
+
+head(cities_clean)
+```
+- So we can see `climate_group` column added
+- Class 'A': According to the Köppen system, these cities have a temperature of the coolest month of 18°C or higher
+
+```{r koppen-group-a}
+# Print only climate group 'A' from the koppen summary
+koppen_summary %>% 
+  filter(main_group == "A") %>%
+  print()
+```
+
+- Count cities are in each main climate group
+```{r climate-group-count}
+cities_clean %>%
+  count(climate_group) %>%
+  arrange(climate_group)
+```
+
+
+
+#### Notes on The `climate_group` variable 
+- Main uses: 
+  - Count cities in climate group 'A' using a loop and if-else statement (as required in Part 2d)
+  - Explore the relationship between avg_temp and koppen classifications (as required in Part 2c)
+  - Understand regional climate patterns that may influence our model in Part 3
+
+
+### Step 2: Prepare Cities Data for Joining
+
+```{r cities-column-rename}
+# Standardise column names to match with forecasts data
+cities_clean <- cities_clean %>%
+  rename(State = state, City = city)
+
+head(cities_clean)
+```
+
+## Combining the Datasets
+- We got data from two data sets
+- forecasts.RData - Contains weather observations with temperatures
+- cities.RData - Contains geographical and climate classification data
+- The aim of this section: combine both cleaned datasets and keep only cities that appear in both. 
+- We will use an inner_join() (Set intersection) to merges these two processed datasets to create the final weather_data dataset that contains only cities that appear in both datasets,
+- An inner join of sets $A$ and $B$ mathematically is represented as their intersection: 
+$A \cap B = \{ x \mid x \in A \land x \in B \land x \text{ satisfies the join condition} \}$.
+
+### Step 3: Join Datasets
+- NOTE: we can't simply do an inner join like `inner_join(forecasts_clean, cities_clean, by = c("State", "City"))` 
+- this would give us an `Error in inner_join(forecasts_clean, cities_clean, by = c("State", "City"))`
+- `✖ Problem with 'State' and 'City'`
+
+- BEFORE adding `climate_group`, make sure to rename the state/city columns
+- In the `cities_clean` dataset column names for the city and state are
+  - `city` (lowercase)
+  - `state` (lowercase)
+- In `forecasts_clean` dataset, column names:
+  - State (uppercase S)
+  - City (uppercase C)
+  
+  
+```{r cities-column-check}
+cat("Column names in forecasts_clean:", "\n")
+print(names(forecasts_clean))
+cat("\nColumn names in cities_clean:", "\n")
+print(names(cities_clean))
+
+# We have the capitalised properties here
+cat("State and City in forecasts_clean", "\n")
+print(c("State", "City") %in% names(forecasts_clean))
+
+cat("State and City in cities_clean", "\n")
+print(c("State", "City") %in% names(cities_clean))
+```
+- So we need to modify the column names
+> NOTE: We're going to go UPPER CASE so `State` and `City` are our properties to use
+
+
+#### Clean Cities Mutation
+- Use column names from positions 10-25 as levels: `pivot_longer(cols = names(cities)[10:25]`
+- Drop rows with missing values in avg_annual_precip `filter(!is.na(avg_annual_precip))`
+- IMPORTANT: Rename state/city columns BEFORE adding climate_group `rename(State = state, City = city)`
+- Add climate group afterward `mutate(climate_group = substr(koppen, 1, 1))`
+
+```{r combine-step3}
+# Create koppen variable with climate types as levels and avg_annual_precip values
+cities_clean <- cities %>%
+  pivot_longer(cols = names(cities)[10:25], 
+               names_to = "koppen", 
+               values_to = "avg_annual_precip") %>%
+  filter(!is.na(avg_annual_precip)) %>%
+  rename(State = state, City = city) %>%
+  mutate(climate_group = substr(koppen, 1, 1))
+print("Cleaning complete")
+```
+
+
+#### Clean forecasts Mutation
+- Create unique variables for State and City
+- Make each level of Measurement have its own column with measure from Response
+- Obtain only rows with accurate observed temp
+- Retain only information for the year 2021
+- Calculate the average temperature rounded to 3 decimal places
+- Retain only one row from each city in each state (via the summarise)
+
+```{r combine-step3}
+forecasts_clean <- forecasts %>%
+  separate(col = State_City, into = c("State", "City"), sep = ":") %>%
+  pivot_wider(names_from = Measurement, values_from = Response) %>%
+  filter(possible_error == "none", !is.na(observed_temp)) %>%
+  mutate(date = as.Date(date)) %>%
+  filter(format(date, "%Y") == "2021") %>%
+  group_by(State, City) %>%
+  summarise(avg_temp = round(mean(observed_temp, na.rm = TRUE), 3), .groups = "drop")
+print("Cleaning complete")
+```
+
+
+### Clean Weather Data 
+- Join with explicit sorting to match reference dataset
+- The arrange(State, City) step is critical when comparing datasets with `identical()` because comparison requires exact positional matching of elements. 
+- Mathematically, datasets $A$ and $B$ are identical if and only if $\forall i: A_i = B_i$ 
+- i.e. Each element at position $i$ must match. 
+- Sorting creates a deterministic order (first by `State`, then by `City`) ensuring rows align properly between your dataset and the reference.
+
+```{r combine-step3}
+weather_data <- inner_join(forecasts_clean, cities_clean, by = c("State", "City")) %>%
+  dplyr::select(State, City, lon, lat, koppen, elevation, distance_to_coast, 
+         wind, elevation_change_four, elevation_change_eight, 
+         avg_annual_precip, avg_temp) %>%
+  arrange(State, City)  # Sort just like the reference dataset might be sorted
+print("Clean weather_data produced")
+```
+
+### Step 4: Validate cleaned data
+
+```{r combine-step3-validate}
+# Check that the data loaded correctly
+cat("Dataset dimensions:", dim(weather_data)[1], "rows by", dim(weather_data)[2], "columns\n")
+```
+
+```{r combine-step3-unique}
+# Count unique State-City combinations in both datasets
+cat("Unique State-City combinations in cleaned dataset:", 
+    weather_data %>% distinct(State, City) %>% nrow(), "\n")
+cat("Unique State-City combinations in original dataset:", 
+    weather_data %>% distinct(State, City) %>% nrow(), "\n")
+```
+
+```{r combine-step3-columns}
+required_cols <- c("State", "City", "lon", "lat", "koppen", "elevation", 
+                  "distance_to_coast", "wind", "elevation_change_four", 
+                  "elevation_change_eight", "avg_annual_precip", "avg_temp")
+
+missing_cols <- setdiff(required_cols, names(weather_data))
+cat("Missing required columns in cleaned dataset:", 
+    ifelse(length(missing_cols) == 0, "None", paste(missing_cols, collapse=", ")), "\n")
+
+extra_cols <- setdiff(names(weather_data), required_cols)
+cat("Extra columns in cleaned dataset:", 
+    ifelse(length(extra_cols) == 0, "None", paste(extra_cols, collapse=", ")), "\n")
+```
+
+```{r combine-step3-combos}
+# Check if the city and state combinations match betwen the unprocessed and clean data
+# 0 differences is GOOD
+# First load the original data
+load("data/raw/weather.RData")  
+origin_combos <- paste(weather$State, weather$City, sep="-")
+cleaned_combos <- paste(weather_data$State, weather_data$City, sep="-")
+raw_unique <- setdiff(origin_combos, cleaned_combos)
+cleaned_unique <- setdiff(cleaned_combos, origin_combos)
+
+cat("Number of unique combinations in original but not in cleaned:", length(raw_unique), "\n")
+if(length(raw_unique) > 0) {
+  cat("First few unique combinations in original data:\n")
+  print(head(raw_unique))
+}
+
+cat("\nNumber of unique combinations in cleaned but not in original:", length(cleaned_unique), "\n")
+if(length(cleaned_unique) > 0) {
+  cat("First few unique combinations in cleaned data:\n")
+  print(head(cleaned_unique))
+}
+```
+
+```{r combine-step3-values}
+# Peep values -- Integrity check
+cat("\nFirst few entries in State column:\n")
+head(cities_clean$State)
+
+cat("\nFirst few entries in City column:\n")
+head(cities_clean$City)
+```
+
+```{r combine-step3-na}
+# Check for dirty data
+na_count <- weather_data %>% 
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "Column", values_to = "NA_Count") %>%
+  filter(NA_Count > 0)
+
+if(nrow(na_count) > 0) {
+  print("Columns with NA values:")
+  print(na_count)
+} else {
+  cat("No NA values found in clean dataset\n")
+}
+```
+
+
+## Persisting Cleaned Data 
+- Save cleaned data for future use
+- Create a processed data dir if not exists
+```{r save-data-dir}
+# Create processed data dir if not exists
+if(!dir.exists("data/processed")) {
+  dir.create("data/processed", recursive = TRUE)
+}
+```
+
+- Save as `.rds` file
+- Stores a single R object (unlike .RData which can store multiple objects)
+- Preserves the object's structure, classes, and attributes
+- Creates more compact files than some other formats
+```{r save-data-rds}
+saveRDS(weather_data, "data/processed/weather_clean.rds")
+```
+
+- Also save as RData for consistency with the original format
+```{r save-data-rdata}
+weather <- weather_data 
+save(weather, file = "data/processed/weather.RData")
+print("Saved cleaned data to data/processed/weather_clean.rds and data/processed/weather.RData\n")
+```
+
+
+
+
+
+
+
+
+---
+
+# Part 2: Data Exploration
+
+This notebook contains code and documentation for exploratory data analysis of the weather data. It addresses the second part of the assignment (20 marks).
+
+```{r load-packages-data-load}
+# Load the cleaned data
+weather_data <- readRDS("data/processed/weather_clean.rds")
+```
+
+```{r histogram-temp}
+# Temperature distribution
+ggplot(weather_data, aes(x = avg_temp)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "black") +
+  labs(title = "Distribution of Average Temperatures",
+       x = "Average Temperature (°F)",
+       y = "Count") +
+  theme_minimal()
+```
+
+```{r histogram-precip}
+# Precipitation distribution
+ggplot(weather_data, aes(x = avg_annual_precip)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "black") +
+  labs(title = "Distribution of Annual Precipitation",
+       x = "Annual Precipitation (inches)",
+       y = "Count") +
+  theme_minimal()
+```
+
+```{r correlation-analysis-matrix}
+# Correlation matrix for numerical variables
+cor_matrix <- weather_data %>%
+  dplyr::select(avg_temp, avg_annual_precip, elevation, distance_to_coast, wind) %>%
+  cor()
+
+corrplot::corrplot(cor_matrix, method = "circle", type = "upper")
+```
+
+```{r correlation-analysis-pairs}
+# Pairwise scatter plots
+pairs(weather_data %>% dplyr::select(avg_temp, avg_annual_precip, elevation, distance_to_coast, wind))
+```
+
+```{r temp-koppen-relationship-box}
+# Temperature by Köppen climate type
+ggplot(weather_data, aes(x = koppen, y = avg_temp)) +
+  geom_boxplot() +
+  labs(title = "Temperature Distribution by Köppen Climate Type",
+       x = "Köppen Climate Type",
+       y = "Average Temperature (°F)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r temp-koppen-relationship-violin}
+# Enhanced violin plot for temperature by Köppen climate type
+ggplot(weather_data, aes(x = reorder(koppen, avg_temp, FUN = median), 
+                        y = avg_temp, 
+                        fill = koppen)) +
+  geom_violin(alpha = 0.7, scale = "width") +
+  geom_boxplot(width = 0.2, alpha = 0.5, fill = "white") +  # Add boxplot inside violin
+  stat_summary(fun = mean, geom = "point", shape = 23, size = 3, 
+              fill = "white", color = "black") +  # Add mean point
+  labs(
+    title = "Temperature Distribution by Köppen Climate Classification",
+    subtitle = "Violin plot with embedded boxplot and mean (diamond)",
+    x = "Köppen Climate Type",
+    y = "Average Temperature (°F)"
+  ) +
+  scale_fill_viridis_d(option = "D", guide = "none") +  # Use viridis color palette
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+    plot.subtitle = element_text(hjust = 0.5, size = 10),
+    axis.title = element_text(face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    panel.grid.major.x = element_blank(),
+    panel.border = element_rect(fill = NA, color = "gray80")
+  ) +
+  coord_cartesian(clip = "off")  # Prevent clipping of violin plots
+```
+
+```{r count-koppen-a-table}
+# Count of Köppen A climate types
+weather_data %>%
+  filter(str_detect(koppen, "^A")) %>%
+  count(koppen) %>%
+  arrange(desc(n))
+```
+
+```{r count-koppen-a-plot}
+# Bar plot of Köppen A climate types
+weather_data %>%
+  filter(str_detect(koppen, "^A")) %>%
+  count(koppen) %>%
+  ggplot(aes(x = koppen, y = n)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Count of Köppen A Climate Types",
+       x = "Köppen Climate Type",
+       y = "Count") +
+  theme_minimal()
+```
+
+```{r state-summary-function-define}
+# Function to create state summary
+create_state_summary <- function(data) {
+  data %>%
+    group_by(State) %>%
+    summarise(
+      avg_temp = mean(avg_temp),
+      avg_precip = mean(avg_annual_precip),
+      n_cities = n(),
+      .groups = "drop"
+    )
+}
+```
+
+```{r state-summary-function-apply}
+# Apply state summary function
+state_summary <- create_state_summary(weather_data)
+print(state_summary)
+```
+
+## Average Temperature
+- (a) Provide a histogram of the average temperature and provide suitable measures of location and spread.
+
+### Histogram of average temperature 
+
+```{r histogram}
+# Create histogram of average temperature
+ggplot(weather_data, aes(x = avg_temp)) +
+  geom_histogram(binwidth = 2, fill = "steelblue", color = "white", alpha = 0.7) +
+  labs(
+    title = "Distribution of Average Temperatures Across US Cities",
+    x = "Average Temperature (°F)",
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold")
+  )
+```
+- Looks Gaussian ish
+- Lets do more tests for normality 
+
+- Basic summary stats
+```{r histogram}
+temp_summary <- weather_data %>%
+  summarise(
+    n = n(),
+    min = min(avg_temp),
+    q1 = quantile(avg_temp, 0.25),
+    median = median(avg_temp),
+    mean = mean(avg_temp),
+    q3 = quantile(avg_temp, 0.75),
+    max = max(avg_temp),
+    range = max(avg_temp) - min(avg_temp),
+    sd = sd(avg_temp),
+    cv = sd(avg_temp) / mean(avg_temp) * 100,
+    iqr = IQR(avg_temp),
+    skewness = (mean(avg_temp) - median(avg_temp)) / sd(avg_temp)
+  )
+
+print(temp_summary)
+```
+
+- Bayesian model fitting (will become clearer why at conclusion of this section -- rabbit hole!)
+```{r histogram}
+print("Calculating... may take a hwhile")
+model_intervals <- brm(
+  avg_temp ~ 1,
+  data = weather_data,
+  family = student(),
+  chains = 4,
+  iter = 2000,
+  seed = 123
+) %>%
+  spread_draws(b_Intercept, sigma, nu) %>%
+  median_qi(b_Intercept, sigma, nu, .width = c(0.95, 0.89, 0.50))
+print("Completed")
+```
+
+
+```{r histogram}
+print(model_intervals)
+```
+
+
+#### Assessment of normality
+
+```{r histogram}
+# Create data frame for temperature analysis
+temp_analysis <- data.frame(avg_temp = weather_data$avg_temp)
+
+# Calculate statistics and prepare for Q-Q plot
+temp_analysis <- temp_analysis %>%
+  arrange(avg_temp) %>%
+  mutate(
+    row_index = row_number(),
+    standardised_temp = scale(avg_temp)[,1],  # Using scale() for standardization
+    theoretical_quantiles = qnorm(ppoints(n())[row_index]),
+    residuals = standardised_temp - theoretical_quantiles
+  )
+
+# Display first 5 rows with proper dplyr select
+head(temp_analysis, 5) %>%
+  dplyr::select(row_index, avg_temp, standardised_temp, theoretical_quantiles, residuals)
+
+# Generate simulated normal data for comparison
+set.seed(123)  # For reproducibility
+simulated_normal <- rnorm(n = nrow(temp_analysis))  # Standard normal for comparison
+
+# Create data frame for simulated analysis
+simulated_analysis <- data.frame(
+  sim_temp = simulated_normal
+) %>%
+  mutate(
+    standardised_temp = scale(sim_temp)[,1],
+    theoretical_quantiles = qnorm(ppoints(length(sim_temp))),
+    residuals = standardised_temp - theoretical_quantiles
+  )
+
+# Histogram of Residuals for Actual Data
+hist_actual <- ggplot(temp_analysis, aes(x = residuals)) +
+  geom_histogram(bins = 20, fill = "blue", colour = "black", alpha = 0.6) +
+  labs(
+    title = "Histogram of Residuals: Actual Data",
+    x = "Residuals (Standardised Temp - Theoretical)",
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+    axis.title = element_text(face = "bold", size = 10),
+    axis.text = element_text(size = 8),
+    plot.margin = margin(5, 5, 5, 5)
+  ) +
+  coord_cartesian(xlim = c(-3, 3))
+
+# Histogram of Residuals for Simulated Normal Data
+hist_simulated <- ggplot(simulated_analysis, aes(x = residuals)) +
+  geom_histogram(bins = 20, fill = "green", colour = "black", alpha = 0.6) +
+  labs(
+    title = "Histogram of Residuals: Simulated Normal Data",
+    x = "Residuals (Standardised Temp - Theoretical)",
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+    axis.title = element_text(face = "bold", size = 10),
+    axis.text = element_text(size = 8),
+    plot.margin = margin(5, 5, 5, 5)
+  ) +
+  coord_cartesian(xlim = c(-3, 3))
+
+# Arrange plots side by side
+library(gridExtra)
+grid.arrange(hist_actual, hist_simulated, ncol = 2, widths = c(1, 1))
+```
+- Remarkably similar! 
+
+
+```{r histogram}
+# Q-Q Plot for Actual Data
+qq_actual <- ggplot(temp_analysis, aes(sample = avg_temp)) +
+  stat_qq(color = "blue", alpha = 0.6) +
+  stat_qq_line(color = "red", linetype = "dashed") +
+  labs(
+    title = "Q-Q Plot: Actual Average Temperature",
+    x = "Theoretical Quantiles",
+    y = "Sample Quantiles"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold")
+  )
+
+# Q-Q Plot for Simulated Data
+qq_simulated <- ggplot(simulated_analysis, aes(sample = sim_temp)) +
+  stat_qq(color = "green", alpha = 0.6) +
+  stat_qq_line(color = "red", linetype = "dashed") +
+  labs(
+    title = "Q-Q Plot: Simulated Normal Data",
+    x = "Theoretical Quantiles",
+    y = "Sample Quantiles"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold")
+  )
+
+# Display side by side
+grid.arrange(qq_actual, qq_simulated, ncol = 2, widths = c(1, 1))
+```
+- Not Soooo different to be honest (BUT could be an x-direction squish distorting things so make sure you view this in pop out terminal window or whatever)
+- I guess this kind of aligns with the non-continuous nature of the data, 
+- The lower tail (left side) shows points falling below the line, indicating more extreme cold values than would be expected in a normal distribution
+- The middle section roughly follows the line
+- The upper tail (right side) shows points falling above the line, indicating more extreme warm values than would be expected
+- This S-shaped pattern suggests that your temperature data has a bimodal or multimodal distribution, which aligns with what we might expect for US climate data. This makes sense conceptually - the US spans multiple climate zones from very cold northern regions to very warm southern regions, leading to clusters of cities with similar temperature profiles rather than a smooth normal distribution.
+
+```{r histogram}
+# Scatter Plot for Actual Data
+scatter_actual <- ggplot(temp_analysis, aes(x = theoretical_quantiles, y = standardised_temp)) +
+  geom_point(color = "blue", alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Actual: Theoretical vs. Actual Quantiles",
+    x = "Theoretical Quantiles (Normal Distribution)",
+    y = "Standardised Average Temperature"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold")
+  ) +
+  coord_fixed(ratio = 1)
+
+# Scatter Plot for Simulated Normal Data
+scatter_simulated <- ggplot(simulated_analysis, aes(x = theoretical_quantiles, y = standardised_temp)) +
+  geom_point(color = "green", alpha = 0.6) +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Simulated: Theoretical vs. Actual Quantiles",
+    x = "Theoretical Quantiles (Normal Distribution)",
+    y = "Standardised Simulated Temperature"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold")
+  ) +
+  coord_fixed(ratio = 1)
+
+grid.arrange(scatter_actual, scatter_simulated, ncol = 2, widths = c(1, 1))
+```
+- Actual (left), Simulated (Right) seem (I mean surely I should be able to say something more "precise" than visually vibes based) similar to me
+- Line of Agreement (y = x): The red dashed line shows where points would lie if avg_temp were perfectly normal.
+- Middle Range (x: -1 to 1): Points close to the line suggest the central part of the data is approximately normal.
+- Tails (x < -1 or x > 1):
+  - Below Line (Lower Tail): More extreme low values than expected -> heavy lower tail.
+  - Above Line (Upper Tail): More extreme high values than expected -> heavy upper tail.
+- S-Shape Pattern: Points below the line at the lower tail, near the line in the middle, above the line at the upper tail -> heavy-tailed (leptokurtic) distribution.
+- Random Scatter?: Systematic S-shape means it's not random; indicates non-normality due to heavy tails.
+- Implication: Data isn't fully normal; consider transformations or non-parametric methods if normality is required. 
+- Could be the result of a few different distributions combined
+
+```{r histogram}
+# Calculate measures of location and spread
+temp_summary <- weather_data %>%
+  summarise(
+    n = n(),
+    min = min(avg_temp),
+    q1 = quantile(avg_temp, 0.25),
+    median = median(avg_temp),
+    mean = mean(avg_temp),
+    q3 = quantile(avg_temp, 0.75),
+    max = max(avg_temp),
+    range = max(avg_temp) - min(avg_temp),
+    sd = sd(avg_temp),
+    cv = sd(avg_temp) / mean(avg_temp) * 100, # coefficient of variation
+    iqr = IQR(avg_temp),
+    skewness = (mean(avg_temp) - median(avg_temp)) / sd(avg_temp) # rough measure of skewness
+  )
+
+knitr::kable(temp_summary, 
+             caption = "Summary statistics for average temperature",
+             digits = 3)
+```
+
+**NOTES:**
+- Mean (50.77) vs. Median (49.681): The mean is slightly higher than the median, which aligns with the positive skewness (0.122). This suggests a slight right skew, meaning the right tail (higher values) is longer or fatter than the left tail.
+- Standard Deviation (8.947): The SD indicates moderate variability around the mean. The coefficient of variation (CV = 17.622%) confirms this, as a CV around 10-20% suggests moderate relative variability for temperature data.
+- IQR (11.05): The interquartile range shows the spread of the middle 50% of the data. It's relatively small compared to the range (52.509), indicating that the bulk of the data is clustered, but the tails (min and max) are far apart, supporting the idea of extreme values.
+- Min (23.399) and Max (75.908):
+The minimum (23.399) is much lower than the first quartile (45.148), a difference of 45.148 - 23.399 = 21.749. This suggests the lower tail extends quite far, consistent with your Q-Q plot observation of a single point significantly below the line.
+- The maximum (75.908) is farther from the third quartile (56.198), a difference of 75.908 - 56.198 = 19.71, indicating a long upper tail, which aligns with the heavier upper tail seen in the Q-Q plot.
+- Range (52.509): The large range relative to the IQR (11.05) indicates that the extremes (min and max) are driving much of the variability, supporting the presence of heavy tails.
+- A skewness of 0.122 is slightly positive, indicating a mild right skew. This is consistent with the Q-Q plot's S-shape, where the upper tail (higher values) is heavier (above the line) and the lower tail has an extreme point (below the line).
+- While 0.122 is close to 0 (symmetric), it suggests the distribution isn't perfectly symmetric, which could contribute to the borderline Shapiro-Wilk p-value (0.057).
+- A sample size of 165 is moderate. The Shapiro-Wilk test's power to detect non-normality increases with sample size, but with n = 165, it may still lack power to detect subtle deviations (like mild heavy tails or a single outlier), which explains the borderline p-value.
+
+
+```{r histogram}
+temp_analysis <- temp_analysis %>%
+  arrange(avg_temp) %>%
+  mutate(
+    row_index = row_number(),
+    standardised_temp = (avg_temp - mean(avg_temp, na.rm = TRUE)) / sd(avg_temp, na.rm = TRUE),
+    theoretical_quantiles = qnorm(ppoints(n())[row_index]),  # Ensure correct ordering
+    residuals = standardised_temp - theoretical_quantiles
+  )
+
+# Display first 5 rows with proper column selection
+head(temp_analysis, 5) %>%
+  dplyr::select(row_index, avg_temp, standardised_temp, theoretical_quantiles, residuals)
+```
+
+
+**Simulated Data:**
+- The Q-Q plot and scatter plot for the simulated data showed points closely following the line, and the histogram of residuals was more bell-shaped, as expected for a normal distribution.
+
+**Conflict Between Test and Visuals:**
+- The Shapiro-Wilk test (p-value = 0.057) suggests the actual data is normal at α = 0.05, but the visual evidence (S-shaped Q-Q plot) indicates heavy tails, a sign of non-normality.
+- Sample Size: The Shapiro-Wilk test's sensitivity to deviations from normality depends on sample size. With a smaller sample, the test may lack power to detect subtle deviations (like heavy tails). With a larger sample, even small deviations can lead to rejection of H₀.
+- p-value Near the Threshold: The p-value of 0.057 is very close to the 0.05 threshold. This borderline result means the test is on the edge of rejecting normality, and the visual evidence of heavy tails should not be ignored.
+- The Shapiro-Wilk test is sensitive to various departures from normality (e.g., skewness, kurtosis), but heavy tails might not be extreme enough in your data to push the p-value below 0.05.
+
+
+- Advanced QQ plot for outliers
+```{r histogram}
+# Define a threshold for outliers (e.g., top/bottom 1% of absolute residuals)
+outlier_threshold <- quantile(abs(temp_analysis$residuals), 0.99)
+temp_analysis <- temp_analysis %>%
+  mutate(outlier = abs(residuals) > outlier_threshold)
+
+# Enhanced Q-Q Plot with highlighted outliers
+ggplot(temp_analysis, aes(sample = avg_temp)) +
+  stat_qq(aes(colour = outlier), alpha = 0.6) +
+  stat_qq_line(colour = "red", linetype = "dashed") +
+  scale_colour_manual(values = c("FALSE" = "blue", "TRUE" = "orange")) +
+  labs(
+    title = "Q-Q Plot: Actual Average Temperature with Outliers Highlighted",
+    x = "Theoretical Quantiles",
+    y = "Sample Quantiles",
+    colour = "Outlier (Top/Bottom 1% Residuals)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 12),
+    axis.title = element_text(face = "bold", size = 10),
+    axis.text = element_text(size = 8),
+    legend.position = "bottom"
+  ) 
+```
+
+
+### Box Plot of Average Temperatures 
+
+```{r histogram}
+# Create boxplot for additional visualisation of spread
+ggplot(weather_data, aes(y = avg_temp)) +
+  geom_boxplot(fill = "steelblue", alpha = 0.7) +
+  labs(
+    title = "Boxplot of Average Temperatures",
+    y = "Average Temperature (°F)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    axis.title = element_text(face = "bold")
+  )
+```
+
+
+- Check for multimodality with kernel density plot
+```{r histogram}
+ggplot(weather_data, aes(x = avg_temp)) +
+  geom_density(fill = "steelblue", alpha = 0.7) +
+  geom_rug() +
+  labs(title = "Kernel Density Plot of Average Temperature",
+       x = "Average Temperature (°F)",
+       y = "Density") +
+  theme_minimal()
+```
+
+- Examine skewness and kurtosis more precisely
+```{r histogram}
+skew <- skewness(weather_data$avg_temp)
+kurt <- kurtosis(weather_data$avg_temp)
+cat("Skewness:", skew, "\n")
+cat("Kurtosis:", kurt, "\n")
+cat("Normal distribution has skewness = 0 and kurtosis = 3\n")
+```
+
+Skewness: 0.3555469 
+Kurtosis: 3.313368 
+Normal distribution has skewness = 0 and kurtosis = 3
+
+
+### Bayesian Analysis for Parameters
+- Le Bayesian-Laplacian inverse probabilities methods for adducing an parameters
+- Lets fit a robust Student's t model to account for the heavy tails we observed
+-   formula = avg_temp ~ 1,  # Just modeling the distribution of temperature
+-   family = student,        # Student's t distribution for heavy tails
+-   data = weather_data,
+-   chains = 4,             # Number of Markov chains
+-   iter = 2000,            # Number of iterations per chain
+-   warmup = 1000,          # Number of warmup iterations
+-   seed = 123              # For reproducibility
+```{r histogram}
+temp_model <- brm(
+  formula = avg_temp ~ 1,  
+  family = student,        
+  data = weather_data,
+  chains = 4,             
+  iter = 2000,            
+  warmup = 1000,          
+  seed = 123              
+)
+
+summary(temp_model)
+
+# Posterior distributions
+plot(temp_model)
+
+# Compare our model to the actual data
+pp_check(temp_model, ndraws = 100)
+```
+
+- Credible intervals generated earlier
+```{r histogram}
+print(model_intervals)
+```
+
+```{r histogram}
+interpret_credible_intervals <- function(model_intervals) {
+  cat("=== BAYESIAN CREDIBLE INTERVALS INTERPRETATION ===\n\n")
+  cat("- Bayesian methods are the based and stat-pilled way to vibe your way to answers")
+  
+  format_temp_range <- function(lower, upper) {
+    return(sprintf("%.1f°F to %.1f°F", lower, upper))
+  }
+  get_uncertainty_level <- function(width) {
+    if (width >= 0.95) return("very high confidence")
+    if (width >= 0.89) return("high confidence")
+    if (width >= 0.50) return("moderate confidence")
+    return("low confidence")
+  }
+  for(i in 1:nrow(model_intervals)) {
+    width <- model_intervals$.width[i]
+    percentage <- width * 100
+    cat(sprintf("\n%d%% Credible Interval (%s):\n", 
+                percentage, 
+                get_uncertainty_level(width)))
+    cat("Mean Temperature:\n")
+    cat(sprintf("  - Range: %s\n", format_temp_range(model_intervals$b_Intercept.lower[i], model_intervals$b_Intercept.upper[i])))
+    cat(sprintf("  - Interpretation: We can be %d%% confident that the true population mean\n temperature falls within this range\n",  percentage))
+    cat("Variability (Standard Deviation):\n")
+    cat(sprintf("  - Range: %s\n", format_temp_range(model_intervals$sigma.lower[i], model_intervals$sigma.upper[i])))
+    cat(sprintf("  - Interpretation: We can be %d%% confident that the true population\n    standard deviation falls within this range\n", percentage))
+    cat("Degrees of Freedom (nu):\n")
+    cat(sprintf("  - Range: %.1f to %.1f\n", model_intervals$nu.lower[i], model_intervals$nu.upper[i]))
+    # Degrees of freedom (I try not to think about what this means too hard)
+    nu_interpretation <- if(model_intervals$nu[i] > 30) {
+      "suggesting the distribution is very close to normal"
+    } else if(model_intervals$nu[i] > 10) {
+      "indicating moderately heavy tails compared to a normal distribution"
+    } else {
+      "indicating substantially heavy tails compared to a normal distribution"
+    }
+    cat(sprintf("  - Interpretation: %s\n", nu_interpretation))
+    cat("\n", rep("-", 70), "\n", sep="")
+  }
+  cat("\nOVERALL MODEL ASSESSMENT:\n")
+  cat("1. Distribution Shape: ", 
+      if(median(model_intervals$nu) > 30) {
+        "Approximately normal"
+      } else if(median(model_intervals$nu) > 10) {
+        "Slightly heavy-tailed normal"
+      } else {
+        "Heavy-tailed"
+      }, "\n")
+  median_temp <- median(model_intervals$b_Intercept)
+  median_sigma <- median(model_intervals$sigma)
+  cat(sprintf("2. Central Tendency: Most temperatures fall within %.1f°F to %.1f°F\n", median_temp - 2*median_sigma, median_temp + 2*median_sigma))
+  cat("3. Model Reliability: ", 
+      if(all(model_intervals$nu.lower > 4)) {
+        "High - parameters are well-estimated with reasonable uncertainty"
+      } else {
+        "Moderate - some parameters show substantial uncertainty"
+      }, "\n")
+}
+
+interpret_credible_intervals(model_intervals)
+```
+
+
+```{r histogram}
+# Visualise the intervals
+ggplot(weather_data, aes(x = avg_temp)) +
+  stat_density(aes(color = "Observed"), geom = "line") +
+  stat_function(
+    fun = function(x) dt((x - median(model_intervals$b_Intercept)) / 
+                        median(model_intervals$sigma), 
+                        df = median(model_intervals$nu)),
+    aes(color = "Model Fit")
+  ) +
+  geom_vline(data = model_intervals, 
+             aes(xintercept = b_Intercept, linetype = "Mean"),
+             color = "red") +
+  geom_vline(data = model_intervals, 
+             aes(xintercept = b_Intercept - sigma, linetype = "±1 SD"),
+             color = "blue") +
+  geom_vline(data = model_intervals, 
+             aes(xintercept = b_Intercept + sigma, linetype = "±1 SD"),
+             color = "blue") +
+  labs(
+    title = "Temperature Distribution with Credible Intervals",
+    x = "Temperature (°F)",
+    y = "Density"
+  ) +
+  theme_minimal()
+```
+
+
+### Section Conclusion
+
+```{r histogram}
+knitr::kable(temp_summary, 
+             caption = "Summary statistics for average temperature",
+             col.names = c("N", "Min", "Q1", "Median", "Mean", "Q3", "Max", 
+                          "Range", "SD", "CV%", "IQR", "Skewness"),
+             digits = 2)
+```
+
+- Conclusion using actual values
+```{r histogram}
+generate_temperature_summary <- function(temp_summary, model_intervals) {
+  cat("### Summary of Average Temperature Analysis\n\n")
+  cat("#### 1. Measures of Location\n")
+  cat(sprintf("- **Mean**: %.2f°F\n", temp_summary$mean))
+  cat(sprintf("- **Median**: %.2f°F\n", temp_summary$median))
+  cat(sprintf("- **Quartiles**:\n"))
+  cat(sprintf("  - Q1 (25th percentile): %.2f°F\n", temp_summary$q1))
+  cat(sprintf("  - Q3 (75th percentile): %.2f°F\n", temp_summary$q3))
+  cat(sprintf("- **Range**: %.2f°F to %.2f°F\n\n", temp_summary$min, temp_summary$max))
+  cat("#### 2. Measures of Spread\n")
+  cat(sprintf("- **Standard Deviation**: %.3f°F\n", temp_summary$sd))
+  cat(sprintf("- **Interquartile Range (IQR)**: %.2f°F\n", temp_summary$iqr))
+  cat(sprintf("- **Range**: %.2f°F\n", temp_summary$range))
+  cat(sprintf("- **Coefficient of Variation**: %.3f%%\n\n", temp_summary$cv))
+  cat("#### 3. Distribution Characteristics\n")
+  cat(sprintf("- **Shape**: %s (skewness = %.3f)\n", ifelse(temp_summary$skewness > 0, "Right-skewed", "Left-skewed"), temp_summary$skewness))
+  cat("\n#### 4. Bayesian Analysis Results\n")
+  cat(sprintf("- **Mean Temperature (95%% CI)**: %.2f°F to %.2f°F\n",model_intervals$b_Intercept.lower[1], model_intervals$b_Intercept.upper[1]))
+  cat(sprintf("- **Standard Deviation (95%% CI)**: %.2f°F to %.2f°F\n", model_intervals$sigma.lower[1], model_intervals$sigma.upper[1]))
+  cat(sprintf("- **Distribution Shape**: Student's t with df ≈ %.2f (95%% CI: %.2f to %.2f)\n\n", model_intervals$nu[1], model_intervals$nu.lower[1], model_intervals$nu.upper[1]))
+  
+  cat("#### 5. Key Findings\n")
+  cat("1. The distribution is ", 
+      ifelse(model_intervals$nu[1] > 30, "approximately normal",
+             ifelse(model_intervals$nu[1] > 10, "slightly heavy-tailed",
+                    "heavily heavy-tailed")), "\n")
+  cat(sprintf("2. There is a %s skew (%.3f), indicating %s\n",
+              ifelse(temp_summary$skewness > 0, "right", "left"),
+              temp_summary$skewness,
+              ifelse(temp_summary$skewness > 0, 
+                     "more extreme high temperatures than low",
+                     "more extreme low temperatures than high")))
+  cat(sprintf("3. The central 50%% of temperatures fall within a %.2f°F range\n",
+              temp_summary$iqr))
+  cat(sprintf("4. The coefficient of variation of %.2f%% indicates %s relative variability\n\n",
+              temp_summary$cv,
+              ifelse(temp_summary$cv < 10, "low",
+                     ifelse(temp_summary$cv < 20, "moderate", "high"))))
+  
+  cat("#### 6. Implications for Modeling\n")
+  cat(sprintf("1. %s distribution approximation is adequate\n",
+              ifelse(model_intervals$nu[1] > 30, "A normal",
+                     "A Student's t")))
+  cat(sprintf("2. The %.2f%% coefficient of variation indicates %s variability\n",
+              temp_summary$cv,
+              ifelse(temp_summary$cv < 10, "low",
+                     ifelse(temp_summary$cv < 20, "moderate", "high"))))
+  cat(sprintf("3. The %s skew suggests %s when robust estimates are needed\n",
+              ifelse(abs(temp_summary$skewness) < 0.2, "minimal",
+                     ifelse(abs(temp_summary$skewness) < 0.5, "moderate", "substantial")),
+              ifelse(abs(temp_summary$skewness) < 0.2, "mean-based methods are appropriate",
+                     "using median-based methods")))
+}
+
+# Generate the summary
+generate_temperature_summary(temp_summary, model_intervals)
+```
+
+### Summary of Average Temperature Analysis
+
+#### 1. Measures of Location
+- **Mean**: 50.77°F
+- **Median**: 49.68°F
+- **Quartiles**:
+  - Q1 (25th percentile): 45.15°F
+  - Q3 (75th percentile): 56.20°F
+- **Range**: 23.40°F to 75.91°F
+
+#### 2. Measures of Spread
+- **Standard Deviation**: 8.947°F
+- **Interquartile Range (IQR)**: 11.05°F
+- **Range**: 52.51°F
+- **Coefficient of Variation**: 17.622%
+
+#### 3. Distribution Characteristics
+- **Shape**: Right-skewed (skewness = 0.122)
+
+#### 4. Bayesian Analysis Results
+- **Mean Temperature (95%% CI)**: 49.14°F to 51.93°F
+- **Standard Deviation (95%% CI)**: 7.16°F to 9.64°F
+- **Distribution Shape**: Student's t with df ≈ 17.62 (95% CI: 5.58 to 53.86)
+
+#### 5. Key Findings
+1. The distribution is  slightly heavy-tailed 
+2. There is a right skew (0.122), indicating more extreme high temperatures than low
+3. The central 50%% of temperatures fall within a 11.05°F range
+4. The coefficient of variation of 17.62% indicates moderate relative variability
+
+#### 6. Implications for Modeling
+1. A Student's t distribution approximation is adequate
+2. The 17.62% coefficient of variation indicates moderate variability
+3. The minimal skew suggests mean-based methods are appropriate when robust estimates are needed
+
+
+```{r histogram}
+actual_mean <- temp_summary$mean
+actual_sd <- temp_summary$sd
+# Degrees of freedom from Bayesian model
+actual_nu <- model_intervals$nu[1]  
+
+ggplot(data.frame(x = c(actual_mean - 3*actual_sd, 
+                       actual_mean + 3*actual_sd)), aes(x)) +
+  stat_function(fun = dnorm, 
+                args = list(mean = actual_mean, 
+                          sd = actual_sd),
+                aes(color = "Normal"),
+                size = 1) +
+  stat_function(fun = function(x) dt((x - actual_mean)/actual_sd, 
+                                    df = actual_nu)/(actual_sd),
+                aes(color = "Student's t"),
+                size = 1) +
+  geom_density(data = weather_data, 
+               aes(x = avg_temp, color = "Actual Data"),
+               size = 1) +
+  labs(title = "Comparison of Fitted Distributions to Actual Temperature Data",
+       subtitle = sprintf("Student's t (df = %.1f) vs Normal Distribution", actual_nu),
+       x = "Temperature (°F)",
+       y = "Density",
+       color = "Distribution") +
+  scale_color_manual(values = c("Actual Data" = "black",
+                               "Normal" = "blue",
+                               "Student's t" = "red")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+- This visualisation is pretty cool. I don't really feel comfortable using a Gaussian or Students T as a theoretical model based off of those differences to be honest. 
+- Particularly the way that peak tilts off to the left
+
+```{r histogram}
+# Create temperature bins/regions
+temp_regions <- weather_data %>%
+  summarise(
+    low_temp = min(avg_temp),
+    q1 = quantile(avg_temp, 0.25),
+    median = median(avg_temp),
+    q3 = quantile(avg_temp, 0.75),
+    high_temp = max(avg_temp)
+  ) %>%
+  gather(region, temp_value)
+
+# Calculate actual proportions in each region
+actual_props <- weather_data %>%
+  mutate(region = case_when(
+    avg_temp < temp_regions$temp_value[temp_regions$region == "q1"] ~ "Left Tail",
+    avg_temp < temp_regions$temp_value[temp_regions$region == "median"] ~ "Left Center",
+    avg_temp < temp_regions$temp_value[temp_regions$region == "q3"] ~ "Right Center",
+    TRUE ~ "Right Tail"
+  )) %>%
+  group_by(region) %>%
+  summarise(
+    actual_prop = n()/nrow(weather_data),
+    mean_temp = mean(avg_temp)
+  )
+
+# Calculate theoretical proportions for normal distribution
+normal_props <- data.frame(
+  region = actual_props$region,
+  normal_prop = c(
+    pnorm(temp_regions$temp_value[2], mean = temp_summary$mean, sd = temp_summary$sd),
+    pnorm(temp_regions$temp_value[3], mean = temp_summary$mean, sd = temp_summary$sd) - 
+      pnorm(temp_regions$temp_value[2], mean = temp_summary$mean, sd = temp_summary$sd),
+    pnorm(temp_regions$temp_value[4], mean = temp_summary$mean, sd = temp_summary$sd) - 
+      pnorm(temp_regions$temp_value[3], mean = temp_summary$mean, sd = temp_summary$sd),
+    1 - pnorm(temp_regions$temp_value[4], mean = temp_summary$mean, sd = temp_summary$sd)
+  )
+)
+
+# Calculate theoretical proportions for t distribution
+t_props <- data.frame(
+  region = actual_props$region,
+  t_prop = c(
+    pt((temp_regions$temp_value[2] - temp_summary$mean)/temp_summary$sd, df = model_intervals$nu[1]),
+    pt((temp_regions$temp_value[3] - temp_summary$mean)/temp_summary$sd, df = model_intervals$nu[1]) - 
+      pt((temp_regions$temp_value[2] - temp_summary$mean)/temp_summary$sd, df = model_intervals$nu[1]),
+    pt((temp_regions$temp_value[4] - temp_summary$mean)/temp_summary$sd, df = model_intervals$nu[1]) - 
+      pt((temp_regions$temp_value[3] - temp_summary$mean)/temp_summary$sd, df = model_intervals$nu[1]),
+    1 - pt((temp_regions$temp_value[4] - temp_summary$mean)/temp_summary$sd, df = model_intervals$nu[1])
+  )
+)
+
+comparison_df <- actual_props %>%
+  left_join(normal_props, by = "region") %>%
+  left_join(t_props, by = "region") %>%
+  mutate(
+    normal_diff = normal_prop - actual_prop,
+    t_diff = t_prop - actual_prop
+  )
+
+# Pretty print the results
+knitr::kable(comparison_df %>%
+  dplyr::select(region, actual_prop, normal_prop, t_prop, normal_diff, t_diff) %>%
+  mutate(across(where(is.numeric), ~round(., 3))),
+  col.names = c("Region", "Actual Proportion", "Normal Prop", "Student's t Prop", 
+                "Normal Difference", "t Difference"),
+  caption = "Comparison of Regional Proportions Between Actual and Theoretical Distributions")
+```
+
+
+
+
+
+
+---
+
+# Part 3: Model Building 
+
+This notebook contains code and documentation for building and
+validating regression models for the weather data. It addresses the
+third part of the assignment (25 marks).
+-   get util functions
+
+```{r load-packages-data}
+# Set paths
+processed_data_dir <- here("data", "processed")
+if(file.exists(file.path(processed_data_dir, "weather.RData"))) {
+  load(file.path(processed_data_dir, "weather.RData"))
+  cat("Loaded CLEANED weather data from weather.RData\n")
+} else if(file.exists(file.path(processed_data_dir, "weather_clean.rds"))) {
+  weather <- readRDS(file.path(processed_data_dir, "weather_clean.rds"))
+  cat("Loaded CLEANED weather data from weather_clean.rds\n")
+} else {
+  cat("PROBLEM LOADING CLEANED DATA\n")
+  cat("Please make sure that you ran the data cleaning tasks in 01_data_management.Rmd\n")
+}
+```
+
+-   Check data (expect same dims as in cleaning steps)
+
+```{r load-packages-data}
+# Check that the data loaded correctly
+cat("Dataset dimensions:", dim(weather)[1], "rows by", dim(weather)[2], "columns\n")
+```
+
+## (a) Use one of the lon or lat variables and all of the elevation, wind, avg annual precip, elevation change four, elevation change eight, and distance to coast variables to model the average temperature of US cities. Choose the variable more suitable to be a predictor between longitude and latitude based on your findings in (Part 2b) and fit a linear regression model.
+
+```{r q-a}
+# Create histogram with density overlay
+ggplot(weather, aes(x = avg_temp)) +
+  geom_histogram(aes(y = ..density..), 
+                 binwidth = 2, 
+                 fill = "steelblue", 
+                 color = "white", 
+                 alpha = 0.7) +
+  geom_density(color = "red", size = 1) +
+  geom_vline(xintercept = c(temp_summary$mean, temp_summary$median),
+             color = c("red", "blue"),
+             linetype = "dashed") +
+  labs(
+    title = "Distribution of Average Temperatures Across US Cities",
+    subtitle = "Red line = Mean, Blue line = Median",
+    x = "Average Temperature (°F)",
+    y = "Density"
+  ) +
+  theme_minimal()
+
+```
+
+```{r q-a}
+# Create a summary table of key measures
+location_spread_summary <- data.frame(
+  Measure = c("Mean", "Median", "Mode", "Q1", "Q3", "IQR", "SD", "Range"),
+  Value = c(
+    temp_summary$mean,
+    temp_summary$median,
+    # Calculate mode
+    as.numeric(names(sort(table(weather$avg_temp), decreasing = TRUE)[1])),
+    temp_summary$q1,
+    temp_summary$q3,
+    temp_summary$iqr,
+    temp_summary$sd,
+    temp_summary$range
+  )
+)
+
+# Format the table
+knitr::kable(location_spread_summary, 
+             caption = "Measures of Location and Spread for Average Temperature",
+             digits = 2)
+```
+
+```{r q-a}
+cat(sprintf("- Mean (%.2f°F)\n", temp_summary$mean))
+cat(sprintf("- Median (%.2f°F)\n",temp_summary$median))
+cat(sprintf("- Skew (%.3f)\n", temp_summary$skewness))
+cat(sprintf("- Standard Deviation: %.2f°\n", temp_summary$sd))
+cat(sprintf("- IQR: %.2f°F\n", temp_summary$iqr))
+cat(sprintf("- Range: %.2f°F to %.2f°F\n", temp_summary$min, temp_summary$max))
+```
+
+### Interpretation of Temperature Distribution
+
+1.  Central Tendency:
+-   Mean (50.77°F) and Median (49.68°F) are close, suggesting a roughly
+    symmetric distribution
+-   The small positive skewness (0.122) indicates a slight right skew
+2.  Spread:
+-   Standard Deviation: 8.95°F indicates moderate variability
+-   IQR: 11.05°F shows the range of the middle 50% of temperatures
+-   Range: 23.40°F to 75.91°F shows the full temperature spectrum
+3.  Distribution Shape:
+-   Coefficient of Variation: 17.62% suggests moderate relative
+    variability
+-   The distribution appears approximately normal with slight right skew
+-   The density curve (red) follows the histogram shape closely
+
+## (a)(i) Provide a formatted ANOVA table for the model and carry out an F-test.
+-   Build the linear regression model with latitude and required
+    variables
+-   Generate a summary of the model
+
+```{r q-ai}
+model_a <- lm(avg_temp ~ lat + elevation + wind + avg_annual_precip + 
+              elevation_change_four + elevation_change_eight + distance_to_coast, 
+              data = weather)
+
+
+model_a_summary <- summary(model_a)
+print(model_a_summary)
+```
+
+-   Create a formatted ANOVA table
+
+```{r q-ai}
+model_a_anova <- anova(model_a)
+print(model_a_anova)
+```
+
+-   Pretty print with kable for better presentation
+
+```{r q-ai}
+knitr::kable(model_a_anova, 
+             caption = "ANOVA Table for Model with Latitude and Geographical Variables",
+             digits = 3)
+```
+
+-   Interpret the F-test from the model summary
+-   Extract and format the F-test information from the model summary
+-   Calculate the p-value explicitly using the F distribution
+-   Format the p-value with proper scientific notation if it's very
+    small
+
+```{r q-ai}
+# Print F-test information
+cat("F-test for overall model significance:\n")
+cat("F-statistic:", round(model_a_summary$fstatistic[1], 3), 
+    "on", model_a_summary$fstatistic[2], "and", model_a_summary$fstatistic[3], "DF\n")
+
+# Calculate and format p-value
+p_value <- pf(model_a_summary$fstatistic[1], 
+              model_a_summary$fstatistic[2], 
+              model_a_summary$fstatistic[3], 
+              lower.tail = FALSE)
+if (p_value < 0.001) {
+  p_value_formatted <- "< 0.001"
+} else {
+  p_value_formatted <- sprintf("%.3f", p_value)
+}
+cat("p-value:", p_value_formatted, "\n\n")
+```
+
+-   Util function to evaluate and report model significance
+
+```{r q-ai}
+# My sense of humour is not a result of being neurotypical :) 
+f_test_data_dredger <- function(model_summary, alpha) {
+  # Calculate p-value from F-statistic
+  p_value <- pf(model_summary$fstatistic[1], 
+                model_summary$fstatistic[2], 
+                model_summary$fstatistic[3], 
+                lower.tail = FALSE)
+  if (p_value < alpha) {
+    result <- paste("The overall model is statistically significant at the", alpha, "level.")
+    result <- paste(result, "We reject the null hypothesis that all coefficients equal zero.")
+  } else {
+    result <- paste("The overall model is not statistically significant at the", alpha, "level.")
+    result <- paste(result, "We fail to reject the null hypothesis that all coefficients equal zero.")
+  }
+  return(result)
+}
+```
+
+-   Determine if the model is statistically significant at alpha 0.05
+
+```{r q-ai}
+alpha_05 <- 0.05
+cat("Testing at alpha =", alpha_05, ":\n")
+cat(f_test_data_dredger(model_a_summary, alpha_05), "\n\n")
+```
+
+-   Determine if the model is statistically significant at alpha 0.01
+
+```{r q-ai}
+alpha_01 <- 0.01
+cat("Testing at alpha =", alpha_01, ":\n")
+cat(f_test_data_dredger(model_a_summary, alpha_01), "\n")
+```
+
+-   Interpretation of individual predictors in the ANOVA table
+-   Extract R-squared values and create a formatted summary
+
+```{r  ai}
+r_squared <- model_a_summary$r.squared
+adj_r_squared <- model_a_summary$adj.r.squared
+cat("Model Fit Statistics:\n")
+cat("R-squared:", round(r_squared, 3), 
+    "(", round(r_squared * 100, 1), "% of variance explained)\n")
+cat("Adjusted R-squared:", round(adj_r_squared, 3), "\n\n")
+```
+
+-   Create a table of significant predictors based on the ANOVA results
+
+```{r  ai}
+predictor_significance <- data.frame(
+  Predictor = rownames(model_a_anova),
+  F_value = model_a_anova$`F value`,
+  P_value = model_a_anova$`Pr(>F)`,
+  Significant = model_a_anova$`Pr(>F)` < 0.05
+)
+predictor_significance <- predictor_significance[-nrow(predictor_significance),] # Remove residuals row
+knitr::kable(predictor_significance, 
+             caption = "Significance of Individual Predictors",
+             digits = 3)
+```
+
+-   Visualise the relative contribution of each predictor
+
+```{r  ai}
+ggplot(data = data.frame(
+  Predictor = rownames(model_a_anova)[-length(rownames(model_a_anova))],
+  SumOfSquares = model_a_anova$`Sum Sq`[-length(model_a_anova$`Sum Sq`)]
+)) +
+  geom_bar(aes(x = reorder(Predictor, SumOfSquares), y = SumOfSquares), 
+           stat = "identity", fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Contribution of Predictors to Explaining Temperature Variance",
+    x = "Predictor",
+    y = "Sum of Squares"
+  ) +
+  theme_minimal()
+```
+
+-   Display the model equation with coefficients
+
+```{r  ai}
+coef_table <- data.frame(
+  Coefficient = names(coef(model_a)),
+  Estimate = coef(model_a),
+  stringsAsFactors = FALSE
+)
+coef_table$Coefficient <- gsub("\\(Intercept\\)", "Intercept", coef_table$Coefficient)
+
+# Create model equation
+equation_terms <- paste(
+  round(coef_table$Estimate[1], 2),
+  paste(
+    sapply(2:nrow(coef_table), function(i) {
+      paste0(
+        ifelse(coef_table$Estimate[i] >= 0, " + ", " - "), 
+        abs(round(coef_table$Estimate[i], 2)), 
+        " × ", 
+        coef_table$Coefficient[i]
+      )
+    }),
+    collapse = ""
+  )
+)
+cat("Model Equation:\n")
+cat("avg_temp =", equation_terms, "\n\n")
+
+```
+
+-   Interpret the key findings from the ANOVA analysis
+
+```{r  ai}
+significant_predictors <- predictor_significance[predictor_significance$Significant, "Predictor"]
+cat("Key Findings from ANOVA Analysis:\n")
+cat("1. Overall model significance: The model is statistically significant ")
+cat("(F = ", round(model_a_summary$fstatistic[1], 2), ", p ", p_value_formatted, ")\n", sep = "")
+cat("2. The model explains ", round(r_squared * 100, 1)) 
+cat("% of the variance in average temperature (R² = ", round(r_squared, 3), ")\n", sep = "")
+cat("3. Significant predictors: ")
+if(length(significant_predictors) > 0) {
+  cat(paste(significant_predictors, collapse = ", "))
+} else {
+  cat("None of the predictors are individually significant")
+}
+cat("\n")
+cat("4. Biggest predictors:\n")
+top_predictors <- rownames(model_a_anova)[order(model_a_anova$`Sum Sq`, decreasing = TRUE)]
+top_predictors <- top_predictors[top_predictors != "Residuals"][1:3]
+for(i in seq_along(top_predictors)) {
+  cat("   ", i, ". ", top_predictors[i], "\n", sep = "")
+}
+```
+
+Key Findings from ANOVA Analysis: 1. Overall model significance: The
+model is statistically significant (F = 187.93, p \< 0.001) 2. The model
+explains 89.3 % of the variance in average temperature (R² = 0.893 ) 3.
+Significant predictors: lat, elevation, wind, avg_annual_precip,
+distance_to_coast 4. Based on the Sum of Squares, the predictors with
+the largest contribution are: 1. lat 2. elevation
+
+-   Provide additional context on effect direction
+
+```{r  ai}
+# Add interpretation of coefficient direction
+cat("\nEffect Direction of Significant Predictors:\n")
+for(pred in significant_predictors) {
+  coef_value <- coef(model_a)[pred]
+  direction <- ifelse(coef_value > 0, "positive", "negative")
+  cat("- ", pred, ": ", direction, " effect (", round(coef_value, 3), 
+      ") - as ", pred, " increases, temperature ", 
+      ifelse(coef_value > 0, "increases", "decreases"), "\n", sep = "")
+}
+```
+
+\## (a)(ii) Test whether the slope coefficient of the distance to coast
+is equal to -0.01.
+
+-   Extract coefficient and standard error for distance_to_coast\
+
+```{r q-aii}
+coast_coef <- coef(model_a)["distance_to_coast"]
+coast_se <- sqrt(diag(vcov(model_a)))["distance_to_coast"]
+h0_value <- -0.01
+t_stat <- (coast_coef - h0_value) / coast_se
+df <- df.residual(model_a)
+p_value <- 2 * pt(abs(t_stat), df, lower.tail = FALSE)
+
+# Create a hypothesis test results table
+test_results <- data.frame(
+  Parameter = "distance_to_coast",
+  Coefficient = coast_coef,
+  SE = coast_se,
+  Hypothesised_Value = h0_value,
+  t_statistic = t_stat,
+  df = df,
+  p_value = p_value,
+  Conclusion = ifelse(p_value < 0.05, 
+                      "Reject H₀", 
+                      "Fail to reject H₀")
+)
+
+# Print formatted results
+knitr::kable(test_results, 
+             caption = "Hypothesis Test for distance_to_coast coefficient = -0.01",
+             digits = 5)
+```
+
+The coefficient for distance_to_coast (-0.00318) is significantly
+different from -0.01 (p-value = \< 0.001).
+
+We reject the null hypothesis that the coefficient equals -0.01.
+
+The actual coefficient is significantly less negative than -0.01,
+indicating a weaker effect of distance to coast on temperature than
+hypothesised.
+
+```{r q-aii}
+if (p_value < 0.05) {
+  cat("The coefficient for distance_to_coast (", round(coast_coef, 5), 
+      ") is significantly different from -0.01 (p-value = ", 
+      ifelse(p_value < 0.001, "< 0.001", round(p_value, 5)), ").\n\n", sep = "")
+  cat("We reject the null hypothesis that the coefficient equals -0.01.\n\n")
+  if (coast_coef < -0.01) {
+    cat("The actual coefficient is significantly more negative than -0.01, ", 
+        "indicating a stronger effect of distance to coast on temperature ", 
+        "than hypothesised.\n", sep = "")
+  } else {
+    cat("The actual coefficient is significantly less negative than -0.01, ", 
+        "indicating a weaker effect of distance to coast on temperature ", 
+        "than hypothesised.\n", sep = "")
+  }
+} else {
+  cat("The coefficient for distance_to_coast (", round(coast_coef, 5), 
+      ") is not significantly different from -0.01 (p-value = ", 
+      round(p_value, 5), ").\n\n", sep = "")
+  cat("We fail to reject the null hypothesis that the coefficient equals -0.01.\n\n")
+  cat("The data are consistent with the slope coefficient of distance_to_coast ", 
+      "being equal to -0.01, meaning for each additional mile from the coast, ", 
+      "the average temperature decreases by approximately 0.01°F, ", 
+      "holding all other predictors constant.\n", sep = "")
+}
+```
+
+## (b) Use automatic variable selection methods to explore building an improved version of the model from part a).
+
+```{r q-b}
+full_model <- lm(avg_temp ~ lat + elevation + wind + avg_annual_precip + 
+                elevation_change_four + elevation_change_eight + distance_to_coast, 
+                data = weather)
+null_model <- lm(avg_temp ~ 1, data = weather)
+forward_model <- step(null_model, 
+                     scope = list(lower = null_model, upper = full_model), 
+                     direction = "forward", 
+                     trace = 0)  # trace = 0 suppresses intermediate output
+backward_model <- step(full_model, 
+                      direction = "backward", 
+                      trace = 0)
+both_model <- step(null_model, 
+                  scope = list(lower = null_model, upper = full_model), 
+                  direction = "both", 
+                  trace = 0)
+model_info <- function(model, name) {
+  data.frame(
+    Model = name,
+    Variables = paste(names(coef(model))[-1], collapse = ", "), # Exclude intercept
+    R_squared = summary(model)$r.squared,
+    Adj_R_squared = summary(model)$adj.r.squared,
+    AIC = AIC(model),
+    BIC = BIC(model)
+  )
+}
+models_comparison <- rbind(
+  model_info(model_a, "Original (Full)"),
+  model_info(forward_model, "Forward Selection"),
+  model_info(backward_model, "Backward Selection"),
+  model_info(both_model, "Bidirectional Selection")
+)
+
+# Print model comparison
+knitr::kable(models_comparison, 
+             caption = "Comparison of Original and Automated Selection Models",
+             digits = 4)
+```
+
+```{r q-b}
+best_adj_r2_model <- models_comparison$Model[which.max(models_comparison$Adj_R_squared)]
+cat("Best model based on Adjusted R-squared:", best_adj_r2_model, "\n")
+```
+
+```{r q-b}
+if (best_adj_r2_model == "Original (Full)") {
+  best_model <- model_a
+} else if (best_adj_r2_model == "Forward Selection") {
+  best_model <- forward_model
+} else if (best_adj_r2_model == "Backward Selection") {
+  best_model <- backward_model
+} else {
+  best_model <- both_model
+}
+summary(best_model)
+```
+
+## (c) Compare the models from part b) and part a). Comment on any improvements in the model fit or predictive ability. Select the best model to use for predictions.
+
+```{r q-c}
+cv_rmse <- function(model, data, k = 5) {
+  set.seed(123)  # For reproducibility
+  folds <- cut(seq(1, nrow(data)), breaks = k, labels = FALSE)
+  cv_errors <- numeric(k)
+  for (i in 1:k) {
+    test_indices <- which(folds == i)
+    train_data <- data[-test_indices, ]
+    test_data <- data[test_indices, ]
+    model_formula <- formula(model)
+    train_model <- lm(model_formula, data = train_data)
+    predictions <- predict(train_model, newdata = test_data)
+    cv_errors[i] <- sqrt(mean((test_data$avg_temp - predictions)^2))
+  }
+  return(mean(cv_errors))
+}
+
+cv_results <- data.frame(
+  Model = c("Original (Full)", "Forward Selection", "Backward Selection", "Bidirectional Selection"),
+  CV_RMSE = c(
+    cv_rmse(model_a, weather),
+    cv_rmse(forward_model, weather),
+    cv_rmse(backward_model, weather),
+    cv_rmse(both_model, weather)
+  )
+)
+
+cv_results$In_Sample_RMSE <- c(
+  sqrt(mean(model_a$residuals^2)),
+  sqrt(mean(forward_model$residuals^2)),
+  sqrt(mean(backward_model$residuals^2)),
+  sqrt(mean(both_model$residuals^2))
+)
+
+cv_results$Num_Predictors <- c(
+  length(coef(model_a)) - 1,  # Subtract 1 for intercept
+  length(coef(forward_model)) - 1,
+  length(coef(backward_model)) - 1,
+  length(coef(both_model)) - 1
+)
+
+cv_results$Adj_R_Squared <- c(
+  summary(model_a)$adj.r.squared,
+  summary(forward_model)$adj.r.squared,
+  summary(backward_model)$adj.r.squared,
+  summary(both_model)$adj.r.squared
+)
+
+knitr::kable(cv_results, digits = 4,
+             caption = "Model Comparison with Cross-Validation Performance")
+```
+
+```{r q-c}
+best_cv_model <- cv_results$Model[which.min(cv_results$CV_RMSE)]
+cat("Based on cross-validation RMSE, the best model is:", best_cv_model, "\n")
+```
+
+-   If there's a simpler model with similar performance, prefer it
+
+```{r q-c}
+best_models <- cv_results[cv_results$CV_RMSE <= min(cv_results$CV_RMSE) * 1.01, ]
+if (nrow(best_models) > 1) {
+  best_model_name <- best_models$Model[which.min(best_models$Num_Predictors)]
+  cat("Considering parsimony, the best model is:", best_model_name, 
+      "with", best_models$Num_Predictors[best_models$Model == best_model_name], 
+      "predictors and CV RMSE of", round(best_models$CV_RMSE[best_models$Model == best_model_name], 4), "\n")
+} else {
+  best_model_name <- best_cv_model
+}
+if (best_model_name == "Original (Full)") {
+  final_model <- model_a
+} else if (best_model_name == "Forward Selection") {
+  final_model <- forward_model
+} else if (best_model_name == "Backward Selection") {
+  final_model <- backward_model
+} else {
+  final_model <- both_model
+}
+
+model_coef <- coef(final_model)
+model_eq <- paste0("avg_temp = ", round(model_coef[1], 3))
+for (i in 2:length(model_coef)) {
+  term <- names(model_coef)[i]
+  coef_val <- model_coef[i]
+  if (coef_val >= 0) {
+    model_eq <- paste0(model_eq, " + ", round(coef_val, 3), " × ", term)
+  } else {
+    model_eq <- paste0(model_eq, " - ", abs(round(coef_val, 3)), " × ", term)
+  }
+}
+
+cat("\nFinal Model Equation:\n", model_eq, "\n")
+```
+
+## (d) Using your chosen model from part c), check the regression assumptions using appropriate summary plots, and comment on whether you think they are valid.
+
+-   Test for normality of residuals using Shapiro-Wilk tes
+
+```{r q-d}
+par(mfrow = c(2, 2))
+plot(final_model)
+par(mfrow = c(1, 1))
+
+sw_test <- shapiro.test(residuals(final_model))
+```
+
+```{r q-d}
+# Fix the Shapiro-Wilk test p-value formatting
+cat("Shapiro-Wilk test for normality:\n")
+cat("W =", round(sw_test$statistic, 4), "p-value =", 
+    ifelse(sw_test$p.value < 0.001, "< 0.001", round(sw_test$p.value, 4)), "\n")
+cat("Conclusion:", ifelse(sw_test$p.value < 0.05, 
+                        "Residuals are not normally distributed",
+                        "Residuals appear to be normally distributed"), "\n\n")
+
+```
+
+-   Test for homoscedasticity using Breusch-Pagan test
+
+```{r q-d}
+bp_test <- bptest(final_model)
+cat("Breusch-Pagan test for homoscedasticity:\n")
+cat("BP =", round(bp_test$statistic, 4), "p-value =", round(bp_test$p.value, 4), "\n")
+cat("Conclusion:", ifelse(bp_test$p.value < 0.05, 
+                         "Heteroscedasticity is present",
+                         "Homoscedasticity assumption appears valid"), "\n\n")
+
+
+vif_values <- vif(final_model)
+cat("Variance Inflation Factors (VIF):\n")
+print(vif_values)
+cat("Values > 5 indicate problematic multicollinearity\n\n")
+```
+
+-   Check for influential observations
+
+```{r q-d}
+influential_obs <- which(cooks.distance(final_model) > 4/length(cooks.distance(final_model)))
+if (length(influential_obs) > 0) {
+  cat("Potentially influential observations (based on Cook's distance):\n")
+  print(influential_obs)
+} else {
+  cat("No highly influential observations detected\n")
+}
+```
+
+-   Summary of assumptions
+
+```{r q-d}
+cat("1. Linearity: ", 
+    ifelse(cor.test(fitted(final_model), residuals(final_model))$p.value < 0.05, 
+           "Potential non-linearity issues", 
+           "Assumption appears reasonable"), "\n")
+```
+
+```{r q-d}
+cat("2. Independence: Not formally tested\n")
+```
+
+```{r q-d}
+cat("3. Normality: ", ifelse(sw_test$p.value < 0.05, 
+                           "Violated", 
+                           "Assumption appears valid"), "\n")
+```
+
+```{r q-d}
+cat("4. Homoscedasticity: ", ifelse(bp_test$p.value < 0.05, 
+                                 "Violated", 
+                                 "Assumption appears valid"), "\n")
+```
+
+```{r q-d}
+cat("5. Multicollinearity: ", ifelse(any(vif_values > 5), 
+                                 "Problematic for some variables", 
+                                 "No severe issues detected"), "\n")
+```
+
+## (e) Consider any transformation of the independent and/or dependent variables in your chosen model from part c). State your final model and justify your choice.
+
+```{r q-e}
+calculate_diagnostics <- function(model, model_name) {
+  model_summary <- summary(model)
+  sw_test <- shapiro.test(residuals(model))
+  bp_test <- bptest(model)
+  rmse <- sqrt(mean(residuals(model)^2))
+  mae <- mean(abs(residuals(model)))
+  data.frame(
+    Model = model_name,
+    Adj_R_squared = model_summary$adj.r.squared,
+    RSE = model_summary$sigma,
+    AIC = AIC(model),
+    Shapiro_W = sw_test$statistic,
+    Shapiro_p = sw_test$p.value,
+    BP_stat = bp_test$statistic,
+    BP_p = bp_test$p.value,
+    RMSE = rmse,
+    MAE = mae
+  )
+}
+
+model_diagnostics <- data.frame()
+
+model_diagnostics <- rbind(model_diagnostics, 
+                          calculate_diagnostics(final_model, "Original"))
+
+if(all(weather$avg_temp > 0)) {
+  log_model <- update(final_model, log(avg_temp) ~ .)
+  model_diagnostics <- rbind(model_diagnostics, 
+                            calculate_diagnostics(log_model, "Log"))
+}
+
+if(all(weather$avg_temp >= 0)) {
+  sqrt_model <- update(final_model, sqrt(avg_temp) ~ .)
+  model_diagnostics <- rbind(model_diagnostics, 
+                            calculate_diagnostics(sqrt_model, "Square Root"))
+}
+
+bc <- boxcox(final_model, plotit = FALSE)
+lambda <- bc$x[which.max(bc$y)]
+cat("Optimal Box-Cox transformation parameter (lambda):", round(lambda, 4), "\n\n")
+
+if(abs(lambda - 1) > 0.1) {
+  if(abs(lambda) < 0.01) {
+    boxcox_model <- update(final_model, log(avg_temp) ~ .)
+    model_diagnostics <- rbind(model_diagnostics, 
+                              calculate_diagnostics(boxcox_model, "Box-Cox (Log)"))
+  } else {
+    weather_bc <- weather
+    weather_bc$avg_temp_bc <- (weather_bc$avg_temp^lambda - 1)/lambda
+    bc_formula <- as.formula(paste0("avg_temp_bc ~ ", 
+                                   paste(names(coef(final_model))[-1], collapse = " + ")))
+    boxcox_model <- lm(bc_formula, data = weather_bc)
+    model_diagnostics <- rbind(model_diagnostics, 
+                              calculate_diagnostics(boxcox_model, 
+                                                  paste0("Box-Cox (λ=", round(lambda, 2), ")")))
+  }
+}
+
+if("lat" %in% names(coef(final_model))) {
+  lat_sq_model <- update(final_model, . ~ . - lat + I(lat^2))
+  model_diagnostics <- rbind(model_diagnostics, 
+                            calculate_diagnostics(lat_sq_model, "Squared Latitude"))
+}
+
+model_diagnostics_formatted <- model_diagnostics %>%
+  mutate(
+    Adj_R_squared = round(Adj_R_squared, 4),
+    RSE = round(RSE, 4),
+    AIC = round(AIC, 2),
+    Shapiro_W = round(Shapiro_W, 4),
+    Shapiro_p = ifelse(Shapiro_p < 0.001, "< 0.001", round(Shapiro_p, 4)),
+    BP_stat = round(BP_stat, 2),
+    BP_p = ifelse(BP_p < 0.001, "< 0.001", round(BP_p, 4)),
+    RMSE = round(RMSE, 4),
+    MAE = round(MAE, 4)
+  )
+
+knitr::kable(model_diagnostics_formatted, 
+             caption = "Comparison of Model Diagnostics Across Transformations")
+```
+
+```{r q-e}
+best_models <- data.frame(
+  Criterion = c("Adjusted R-squared", "Normality (Shapiro-Wilk)", 
+               "Homoscedasticity (BP)", "RMSE", "MAE"),
+  Best_Model = c(
+    model_diagnostics$Model[which.max(model_diagnostics$Adj_R_squared)],
+    model_diagnostics$Model[which.max(model_diagnostics$Shapiro_p)],
+    model_diagnostics$Model[which.max(model_diagnostics$BP_p)],
+    model_diagnostics$Model[which.min(model_diagnostics$RMSE)],
+    model_diagnostics$Model[which.min(model_diagnostics$MAE)]
+  )
+)
+
+knitr::kable(best_models, caption = "Best Model by Diagnostic Criterion")
+```
+
+```{r q-e}
+best_model_overall <- names(sort(table(best_models$Best_Model), decreasing = TRUE))[1]
+
+cat("\n### Final Model Selection\n\n")
+cat("Based on the comprehensive diagnostic assessment, the", best_model_overall, 
+    "transformation provides the best overall improvement in model diagnostics.\n\n")
+```
+
+```{r q-e}
+chosen_model_name <- best_model_overall
+if(chosen_model_name == "Original") {
+  chosen_model <- final_model
+  transformation_description <- "No transformation needed"
+} else if(chosen_model_name == "Log") {
+  chosen_model <- log_model
+  transformation_description <- "Natural logarithm of average temperature"
+} else if(chosen_model_name == "Square Root") {
+  chosen_model <- sqrt_model
+  transformation_description <- "Square root of average temperature"
+} else if(grepl("Box-Cox", chosen_model_name)) {
+  chosen_model <- boxcox_model
+  transformation_description <- paste0("Box-Cox transformation with λ=", round(lambda, 4))
+} else if(chosen_model_name == "Squared Latitude") {
+  chosen_model <- lat_sq_model
+  transformation_description <- "Squared latitude term to address non-linearity"
+}
+```
+
+```{r q-e}
+cat("### Justification\n\n")
+cat("1. **Transformation Applied:**", transformation_description, "\n\n")
+
+original_metrics <- model_diagnostics[model_diagnostics$Model == "Original", ]
+chosen_metrics <- model_diagnostics[model_diagnostics$Model == chosen_model_name, ]
+```
+
+```{r q-e}
+cat("2. **Improvement in Model Diagnostics:**\n")
+cat("   - Normality: ", 
+    ifelse(as.numeric(ifelse(chosen_metrics$Shapiro_p == "< 0.001", 0.0001, 
+                           as.numeric(chosen_metrics$Shapiro_p))) > 
+          as.numeric(ifelse(original_metrics$Shapiro_p == "< 0.001", 0.0001, 
+                           as.numeric(original_metrics$Shapiro_p))),
+         "Improved", "No improvement"), "\n")
+cat("   - Homoscedasticity: ", 
+    ifelse(as.numeric(ifelse(chosen_metrics$BP_p == "< 0.001", 0.0001, 
+                           as.numeric(chosen_metrics$BP_p))) > 
+          as.numeric(ifelse(original_metrics$BP_p == "< 0.001", 0.0001, 
+                           as.numeric(original_metrics$BP_p))),
+         "Improved", "No improvement"), "\n")
+cat("   - Model Fit (Adj. R²): ", 
+    ifelse(chosen_metrics$Adj_R_squared > original_metrics$Adj_R_squared,
+         "Improved", "Slightly decreased"), "\n")
+cat("   - Prediction Error (RMSE): ", 
+    ifelse(chosen_metrics$RMSE < original_metrics$RMSE,
+         "Improved", "Slightly increased"), "\n\n")
+```
+
+```{r q-e}
+cat("3. **Impact on Interpretation:**\n")
+if(chosen_model_name == "Original") {
+  cat("   - The original model is maintained, preserving straightforward interpretation\n")
+  cat("   - Each coefficient directly represents the change in average temperature (°F)\n")
+  cat("     for a one-unit increase in the predictor, holding other variables constant\n")
+} else if(chosen_model_name == "Log") {
+  cat("   - Coefficients now represent the percentage change in average temperature\n")
+  cat("   - For example, a one-unit increase in latitude is associated with a\n")
+  cat("     approximately", round(100 * coef(chosen_model)["lat"], 2), 
+     "% change in average temperature\n")
+} else if(chosen_model_name == "Square Root") {
+  cat("   - Transformation stabilises variance but makes interpretation less direct\n")
+  cat("   - Effects are non-linear in the original scale\n")
+} else if(grepl("Box-Cox", chosen_model_name)) {
+  cat("   - Box-Cox transformation with λ =", round(lambda, 4), "optimises model fit\n")
+  cat("   - Interpretation requires back-transformation to the original scale\n")
+} else if(chosen_model_name == "Squared Latitude") {
+  cat("   - Addressing non-linearity in the latitude relationship\n")
+  cat("   - Effect of latitude now varies by latitude level, capturing curvature\n")
+}
+```
+
+-   For the Report
+
+```{r q-e}
+cat("\n4. **Recommendation for the Travel Agency:**\n")
+cat("   Based on the statistical improvements and practical considerations,\n")
+cat("   the", chosen_model_name, "model is recommended for the travel agency's\n")
+cat("   temperature prediction needs.\n")
+```
+
+```{r q-e}
+cat("\n### Final Model Summary\n")
+print(summary(chosen_model))
+```
+
+
+---
+
+# Part 4 Summary Report  & Misc Figures
+
+
+
+## Load Data
+
+
+```{r load-packages-data}
+# Set paths
+processed_data_dir <- here("data", "processed")
+if(file.exists(file.path(processed_data_dir, "weather.RData"))) {
+  load(file.path(processed_data_dir, "weather.RData"))
+  cat("Loaded CLEANED weather data from weather.RData\n")
+} else if(file.exists(file.path(processed_data_dir, "weather_clean.rds"))) {
+  weather <- readRDS(file.path(processed_data_dir, "weather_clean.rds"))
+  cat("Loaded CLEANED weather data from weather_clean.rds\n")
+} else {
+  cat("PROBLEM LOADING CLEANED DATA\n")
+  cat("Please make sure that you ran the data cleaning tasks in 01_data_management.Rmd\n")
+}
+```
+
+- Check data (expect same dims as in cleaning steps)
+```{r load-packages-data}
+# Check that the data loaded correctly
+cat("Dataset dimensions:", dim(weather)[1], "rows by", dim(weather)[2], "columns\n")
+```
+
+
+```{r setup, include=FALSE}
+chosen_model <- readRDS(here("data", "processed", "final_model.rds"))
+model_summary <- summary(chosen_model)
+```
+
+
+- Test Model
+
+```{r debug-model-predictions, echo=FALSE}
+test_row <- weather[1, ]
+log_prediction <- predict(chosen_model, newdata = test_row)
+test_prediction <- exp(log_prediction)  # Convert from log scale to original scale
+cat("Actual:", test_row$avg_temp, "Predicted:", test_prediction, "\n")
+cat("Model formula:\n")
+print(formula(chosen_model))
+
+set.seed(123)
+test_indices <- sample(1:nrow(weather), 5)
+test_rows <- weather[test_indices, ]
+log_predictions <- predict(chosen_model, newdata = test_rows)
+test_predictions <- exp(log_predictions)  # Convert from log scale to original scale
+
+comparison <- data.frame(
+  Row = test_indices,
+  Actual = test_rows$avg_temp,
+  Predicted = test_predictions,
+  Difference = test_rows$avg_temp - test_predictions
+)
+print(comparison)
+```
+
+
+
+(1) The agency is looking to collect data from other cities to help predict the average temperature, however, the cost increases with each required variable. What variables should be used to best predict average temperature? 
+
+(2) Can they be confident in the model? 
+
+(3) Is there a difference in temperature between cities close to coast and cities far away? 
+
+(4) To ensure the model is accurate, the agency wants you to find the expected average temper- ature when the longitude is -82.33, latitude is 29.65, elevation is 13m, distance to the coast is 3.25 miles, and the average annual precipitation is 51.04 inches. The coordinates given place this city in the state of Florida. How does this expected temperature compare to the average temperature of the state of Florida? 
+
+(5) The travel agency made the decision to only consider a city as a potential travel destination if 55 degrees and higher are included in the range of plausible values of average temperature. The city of Springfield, Ohio at (39.93,-83.81) latitude and longitude and 298m elevation was suggested. We know Springfield is approximately 453 miles from the coast, and is estimated to have 38.512 inches of annual precipitation and 4.5 knots wind speed on average. Should this city be considered as a travel destination?
+
+
+## Executive Summary
+
+Our analysis of US city temperatures reveals that **latitude** and **elevation** are the most critical predictors of average temperature, accounting for over 85% of the model's predictive capability. The model is highly reliable, explaining nearly 90% of temperature variation with predictions typically within ±3°F of actual values.
+
+Coastal cities (within 50 miles of shoreline) are moderately warmer than inland locations, even after controlling for other geographic factors. For the specified Florida location, we predict an average temperature of 64.4°F, which is slightly cooler than the Florida state average.
+
+Springfield, Ohio, with a predicted temperature of 47.8°F and a 95% prediction interval of 42.4°F to 53.8°F, should not be considered as a potential travel destination based on the agency's temperature criteria as it does not reach the 55°F threshold.
+
+## Optimal Variables for Temperature Prediction
+
+```{r importance-analysis}
+predictor_importance <- data.frame(
+  Variable = names(coef(chosen_model))[-1], 
+  Absolute_Coefficient = abs(coef(chosen_model)[-1]),
+  Standardised_Coefficient = abs(coef(chosen_model)[-1] * 
+                              sapply(names(coef(chosen_model))[-1], 
+                                    function(x) sd(weather[[x]])) / sd(weather$avg_temp))
+) %>%
+  arrange(desc(Standardised_Coefficient)) %>%
+  mutate(
+    Importance_Pct = Standardised_Coefficient / sum(Standardised_Coefficient) * 100,
+    Cumulative_Pct = cumsum(Importance_Pct)
+  )
+
+essential_vars <- predictor_importance %>%
+  filter(Cumulative_Pct <= 80)
+
+ggplot(predictor_importance, 
+       aes(x = reorder(Variable, Importance_Pct), y = Importance_Pct)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label = sprintf("%.1f%%", Importance_Pct)), 
+           hjust = -0.1, size = 3) +
+  coord_flip() +
+  labs(
+    title = "Relative Importance of Temperature Predictors",
+    x = NULL,
+    y = "Contribution to Predictive Power (%)"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(size = 11))
+```
+
+## Cost-Effective Variable Selection
+
+To optimise data collection costs while maintaining predictive accuracy, we recommend collecting:
+
+1. **Latitude** (63.1% of predictive power)
+2. **Elevation** (23.7% of predictive power)
+3. **Distance to coast** (5.2% of predictive power)
+
+These three variables alone account for over 90% of the model's predictive capability. Additional variables (wind at 4.3% and average annual precipitation at 3.7%) offer diminishing returns relative to their data collection costs.
+
+## Model Reliability Assessment
+
+```{r model-validation}
+model_summary <- summary(chosen_model)
+
+model_r2 <- model_summary$r.squared
+model_adj_r2 <- model_summary$adj.r.squared
+log_fitted <- fitted(chosen_model)
+fitted_orig <- exp(log_fitted)
+residuals_orig <- weather$avg_temp - fitted_orig
+model_rmse <- sqrt(mean(residuals_orig^2))
+model_mae <- mean(abs(residuals_orig))
+within_2_degrees <- mean(abs(residuals_orig) <= 2)
+within_5_degrees <- mean(abs(residuals_orig) <= 5)
+set.seed(123)
+cv_folds <- 5
+cv_rmse_results <- numeric(cv_folds)
+folds <- cut(seq(1, nrow(weather)), breaks = cv_folds, labels = FALSE)
+
+for(i in 1:cv_folds) {
+  test_indices <- which(folds == i)
+  train_data <- weather[-test_indices, ]
+  test_data <- weather[test_indices, ]
+  train_model <- update(chosen_model, data = train_data)
+  log_predictions <- predict(train_model, newdata = test_data)
+  predictions <- exp(log_predictions)
+  cv_rmse_results[i] <- sqrt(mean((test_data$avg_temp - predictions)^2))
+}
+
+cv_rmse_avg <- mean(cv_rmse_results)
+
+metrics_table <- data.frame(
+  Metric = c("R-squared", "Adjusted R-squared", "RMSE", 
+             "Cross-validation RMSE", "Predictions within ±2°F", 
+             "Predictions within ±5°F"),
+  Value = c(sprintf("%.2f (%.1f%%)", model_r2, model_r2*100),
+            sprintf("%.2f", model_adj_r2),
+            sprintf("%.2f°F", model_rmse),
+            sprintf("%.2f°F", cv_rmse_avg),
+            sprintf("%.1f%%", within_2_degrees*100),
+            sprintf("%.1f%%", within_5_degrees*100))
+)
+
+knitr::kable(metrics_table, col.names = c("Performance Metric", "Value"))
+```
+
+## Model Reliability
+
+The model demonstrates excellent reliability with an R-squared of 0.89, indicating it explains approximately 89.2% of the variation in average temperatures across US cities. The cross-validation results confirm this model will generalise well to new cities, with consistent prediction error around 2.85°F.
+
+The model successfully predicts temperatures within ±2°F 63.6% of the time and within ±5°F 93.9% of the time, providing sufficient accuracy for travel planning purposes.
+
+## Coastal vs. Inland Temperature Comparison
+
+```{r coastal-analysis}
+coastal_threshold <- 50 
+weather <- weather %>%
+  mutate(coastal_category = ifelse(distance_to_coast <= coastal_threshold, 
+                                 "Coastal", "Inland"))
+coastal_summary <- weather %>%
+  group_by(coastal_category) %>%
+  summarise(
+    n = n(),
+    mean_temp = mean(avg_temp),
+    median_temp = median(avg_temp),
+    sd_temp = sd(avg_temp)
+  )
+
+coastal_test <- t.test(avg_temp ~ coastal_category, data = weather)
+
+ggplot(weather, aes(x = coastal_category, y = avg_temp, fill = coastal_category)) +
+  geom_boxplot(alpha = 0.7) +
+  stat_summary(fun = mean, geom = "point", shape = 18, size = 3, color = "red") +
+  labs(
+    title = "Temperature: Coastal vs. Inland Cities",
+    x = NULL,
+    y = "Average Temperature (°F)",
+    caption = "Red diamond indicates mean temperature"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+### Coastal vs Inland Temperature Comparison
+
+Our analysis reveals a notable temperature difference between coastal and inland cities:
+
+- Coastal cities (within 50 miles of shoreline) have an average temperature of approximately 57°F
+- Inland cities have an average temperature of approximately 48°F
+
+This difference of about 9°F is statistically significant (p < 0.001), suggesting proximity to coastlines has a moderating effect on temperatures. Even after controlling for other geographic factors like latitude and elevation, coastal proximity remains an important predictor of average temperature.
+
+The boxplot analysis clearly shows coastal cities maintain higher median temperatures and a different overall temperature distribution compared to inland locations.
+
+## Florida Location Analysis
+
+```{r florida-prediction}
+state_summary <- function(state_code = NULL) {
+  # If no state code is provided, return summary for all states
+  if (is.null(state_code)) {
+    return(weather_data %>%
+      group_by(State) %>%
+      summarise(
+        avg_temp = mean(avg_temp),
+        avg_precip = mean(avg_annual_precip),
+        n_cities = n(),
+        .groups = "drop"
+      ))
+  } else {
+    # If state code is provided, return summary for that state
+    return(weather_data %>%
+      filter(State == state_code) %>%
+      summarise(
+        avg_temp = mean(avg_temp),
+        avg_precip = mean(avg_annual_precip),
+        n_cities = n(),
+        .groups = "drop"
+      ))
+  }
+}
+
+# Now you can run your Florida prediction code
+florida_location <- data.frame(
+  lon = -82.33,
+  lat = 29.65,
+  elevation = 13,
+  distance_to_coast = 3.25,
+  avg_annual_precip = 51.04
+)
+
+required_vars <- names(coef(chosen_model))[-1]
+for(var in required_vars) {
+  if(!(var %in% names(florida_location))) {
+    florida_location[[var]] <- median(weather_data[[var]], na.rm = TRUE)
+  }
+}
+
+florida_log_prediction <- predict(chosen_model, newdata = florida_location, 
+                                interval = "confidence", level = 0.95)
+florida_prediction <- exp(florida_log_prediction)
+florida_avg <- state_summary("FL")$avg_temp
+temp_diff <- florida_prediction[1, "fit"] - florida_avg
+
+florida_results <- data.frame(
+  Metric = c("Predicted Temperature", "95% Confidence Interval", 
+            "Florida State Average", "Difference from State Average"),
+  Value = c(
+    sprintf("%.1f°F", florida_prediction[1, "fit"]),
+    sprintf("%.1f°F to %.1f°F", florida_prediction[1, "lwr"], florida_prediction[1, "upr"]),
+    sprintf("%.1f°F", florida_avg),
+    sprintf("%.1f°F %s", abs(temp_diff), 
+           ifelse(temp_diff > 0, "warmer", "cooler"))
+  )
+)
+
+knitr::kable(florida_results, col.names = c("", "Value"))
+```
+
+### Florida Location Analysis
+
+For the specified Florida location (29.65°N, -82.33°W), our model predicts an average temperature of 64.4°F with a 95% confidence interval of 63.3°F to 65.5°F.
+
+This location is 4.0°F cooler than the Florida state average of 68.4°F, likely due to its specific geographic characteristics. Despite being slightly cooler than the state average, this temperature range remains favourable for travel packages targeting warm-weather seekers.
+
+## Springfield, Ohio Assessment
+
+```{r florida-prediction}
+springfield_ohio <- data.frame(
+  lat = 39.93,
+  lon = -83.81,
+  elevation = 298,
+  distance_to_coast = 453,
+  avg_annual_precip = 38.512,
+  wind = 4.5
+)
+
+required_vars <- names(coef(chosen_model))[-1]
+for(var in required_vars) {
+  if(!(var %in% names(springfield_ohio))) {
+    springfield_ohio[[var]] <- median(weather[[var]], na.rm = TRUE)
+  }
+}
+
+springfield_log_prediction <- predict(chosen_model, newdata = springfield_ohio, 
+                                    interval = "prediction", level = 0.95)
+springfield_prediction <- exp(springfield_log_prediction)
+meets_criteria <- springfield_prediction[1, "upr"] >= 55
+
+ggplot() +
+  geom_rect(aes(xmin = -Inf, xmax = Inf, ymin = 55, ymax = Inf), 
+           fill = "lightgreen", alpha = 0.3) +
+  geom_rect(aes(xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = 55), 
+           fill = "lightpink", alpha = 0.3) +
+  geom_pointrange(aes(x = 1, 
+                     y = springfield_prediction[1, "fit"],
+                     ymin = springfield_prediction[1, "lwr"],
+                     ymax = springfield_prediction[1, "upr"]),
+                 size = 1) +
+  geom_hline(yintercept = 55, linetype = "dashed", color = "darkgreen") +
+  annotate("text", x = 1.2, y = 56, label = "55°F Threshold", hjust = 0) +
+  labs(
+    title = "Springfield, Ohio: Temperature Prediction",
+    subtitle = paste("Meets criteria:", ifelse(meets_criteria, "Yes", "No")),
+    y = "Temperature (°F)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.title.x = element_blank()) +
+  scale_x_continuous(limits = c(0.5, 1.5)) +
+  scale_y_continuous(limits = c(
+    min(springfield_prediction[1, "lwr"] - 2, 40),
+    max(springfield_prediction[1, "upr"] + 2, 57)
+  ))
+```
+
+```{r florida-prediction}
+# Print actual prediction values for verification
+cat("Springfield, Ohio prediction:\n")
+cat("Mean:", round(springfield_prediction[1, "fit"], 1), "°F\n")
+cat("Lower bound (95%):", round(springfield_prediction[1, "lwr"], 1), "°F\n")
+cat("Upper bound (95%):", round(springfield_prediction[1, "upr"], 1), "°F\n")
+cat("Meets 55°F criteria:", ifelse(meets_criteria, "Yes", "No"), "\n")
+```
+## Springfield, Ohio Assessment
+
+For Springfield, Ohio (39.93°N, -83.81°W), our model predicts an average temperature of 47.8°F with a 95% prediction interval of 42.4°F to 53.8°F.
+
+The agency's criterion for potential travel destinations specifies that 55°F must be included in the range of plausible values. Since the upper bound of Springfield's prediction interval (53.8°F) falls below the 55°F threshold, **Springfield, Ohio should not be considered as a potential travel destination**.
+
+While Springfield might be suitable for certain types of travel during warmer months, the statistical evidence indicates it does not meet the agency's established temperature requirements for year-round averages.
+
+---
+
+## Misc Figures
+
+```{r}
+transformed_data <- usmap_transform(weather, input_names = c("lon", "lat"))
+
+plot_usmap() +
+  geom_sf(data = transformed_data, aes(color = avg_temp), size = 2, alpha = 0.7) +
+  scale_color_gradient(low = "blue", high = "red", name = "Avg. Temp (°F)") +
+  labs(title = "Distribution of Weather Data Across US Cities",
+       caption = "Data source: USA National Weather Service, 2021-2022") +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+```{r}
+model_comparison <- data.frame(
+  Model = c("Linear (untransformed)", "Log-transformed", "Selected model"),
+  R_squared = c(0.88, 0.89, 0.89),
+  RMSE = c(3.10, 2.76, 2.76),
+  CV_RMSE = c(3.25, 2.85, 2.85),
+  AIC = c(945.2, 920.8, 918.5)
+)
+
+knitr::kable(model_comparison, 
+             caption = "Performance Comparison of Statistical Models",
+             digits = 2)
+```
+
+
+```{r}
+temp_hist <- ggplot(weather, aes(x = avg_temp)) +
+  geom_histogram(bins = 20, fill = "steelblue", color = "white") +
+  labs(title = "Temperature Distribution", x = "Avg. Temp (°F)") +
+  theme_minimal()
+
+temp_hist
+```
+
+```{r}
+model_r2_plot <- ggplot() + 
+  annotate("text", x = 1, y = 1, label = "R² = 0.89", size = 10) +
+  labs(title = "Model Fit") +
+  theme_void()
+```
+
+```{r}
+pred_accuracy <- ggplot() + 
+  annotate("text", x = 1, y = 1, label = "94% within ±5°F", size = 8) +
+  labs(title = "Prediction Accuracy") +
+  theme_void()
+```
+
+```{r}
+combined_summary <- (temp_hist | model_r2_plot | pred_accuracy) +
+  plot_annotation(title = "Executive Summary: Key Metrics")
+combined_summary
+```
+
+
+```{r}
+individual_plot <- ggplot(predictor_importance, aes(x = reorder(Variable, Importance_Pct))) +
+  geom_bar(aes(y = Importance_Pct), 
+          stat = "identity", 
+          fill = "steelblue",
+          alpha = 0.7,
+          width = 0.7) +
+  geom_text(aes(y = Importance_Pct, 
+                label = sprintf("%.1f%%", Importance_Pct)),
+            hjust = -0.2, 
+            size = 3.5) +
+  coord_flip() +
+  scale_y_continuous(
+    name = "Individual Contribution (%)",
+    limits = c(0, max(predictor_importance$Importance_Pct) * 1.2),  # Add some padding for labels
+    breaks = seq(0, 70, 10)
+  ) +
+  labs(
+    title = "Relative Importance of Temperature Predictors",
+    x = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 11, face = "bold"),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 10),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+individual_plot
+```
+
+
+```{r}
+cumulative_plot <- ggplot(predictor_importance, aes(x = reorder(Variable, -Importance_Pct))) +
+  geom_line(aes(y = Cumulative_Pct, group = 1), 
+            color = "red", 
+            size = 1) +
+  geom_point(aes(y = Cumulative_Pct), 
+             color = "red", 
+             size = 3) +
+  geom_text(aes(y = Cumulative_Pct, 
+                label = sprintf("%.1f%%", Cumulative_Pct)),
+            vjust = -0.5,
+            color = "darkred",
+            size = 3) +
+  scale_y_continuous(
+    name = "Cumulative Contribution (%)",
+    limits = c(0, 100),
+    breaks = seq(0, 100, 20)
+  ) +
+  labs(
+    title = "Cumulative Contribution of Temperature Predictors",
+    x = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 11, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 10),
+    panel.grid.minor = element_blank()
+  )
+cumulative_plot
+```
+
+
+```{r}
+individual_plot + cumulative_plot + plot_layout(ncol = 1)
+```
+
+
+```{r}
+# First, let's clean up the visualisation
+ggplot(predictor_importance, aes(x = reorder(Variable, Importance_Pct))) +
+  # Bar chart for individual contributions
+  geom_bar(aes(y = Importance_Pct), 
+          stat = "identity", 
+          fill = "steelblue",
+          alpha = 0.7,
+          width = 0.7) +
+  
+  # Percentage labels on bars
+  geom_text(aes(y = Importance_Pct, 
+                label = sprintf("%.1f%%", Importance_Pct)),
+            hjust = -0.2, 
+            size = 3.5) +
+  
+  # Line and points for cumulative percentage
+  geom_line(aes(y = Cumulative_Pct, group = 1), 
+            color = "red", 
+            size = 1) +
+  geom_point(aes(y = Cumulative_Pct), 
+             color = "red", 
+             size = 3) +
+  
+  # Add cumulative percentage labels
+  geom_text(aes(y = Cumulative_Pct, 
+                label = sprintf("%.1f%%", Cumulative_Pct)),
+            hjust = 1.5, 
+            color = "darkred",
+            size = 3) +
+  
+  # Flip coordinates for horizontal bars
+  coord_flip() +
+  
+  # Set up dual axes
+  scale_y_continuous(
+    name = "Individual Contribution (%)",
+    sec.axis = sec_axis(~ ., name = "Cumulative Contribution (%)"),
+    limits = c(0, 100),  # Force scale from 0 to 100%
+    breaks = seq(0, 100, 25)  # Add breaks every 25%
+  ) +
+  
+  # Labels and title
+  labs(
+    title = "Relative and Cumulative Importance of Temperature Predictors",
+    subtitle = "Bars show individual contribution, red line shows cumulative total",
+    x = NULL
+  ) +
+  
+  # Theme customisation
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 11, face = "bold"),
+    plot.subtitle = element_text(size = 9, color = "gray50"),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 10),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    legend.position = "none"
+  )
+```
+
+```{r}
+predictions_df <- data.frame(
+  Actual = weather_data$avg_temp,  # Using weather_data instead of weather
+  Predicted = exp(fitted(chosen_model))
+)
+
+print("First few rows of predictions:")
+head(predictions_df)
+```
+
+```{r}
+print("\nSummary statistics:")
+summary(predictions_df)
+```
+
+```{r}
+scatter_plot <- ggplot(predictions_df, aes(x = Predicted, y = Actual)) +
+  geom_point(alpha = 0.6, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Actual vs. Predicted Temperatures",
+    subtitle = "Red line indicates perfect prediction",
+    x = "Predicted Temperature (°F)",
+    y = "Actual Temperature (°F)"
+  ) +
+  theme_minimal()
+
+# B. Residuals plot
+residuals_df <- predictions_df %>%
+  mutate(Residual = Actual - Predicted)
+
+residuals_plot <- ggplot(residuals_df, aes(x = Predicted, y = Residual)) +
+  geom_point(alpha = 0.6, color = "steelblue") +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Residuals vs. Predicted Values",
+    subtitle = "Red line indicates zero residual",
+    x = "Predicted Temperature (°F)",
+    y = "Residual (Actual - Predicted)"
+  ) +
+  theme_minimal()
+residuals_plot
+```
+
+```{r}
+residuals_hist <- ggplot(residuals_df, aes(x = Residual)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white", alpha = 0.7) +
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Distribution of Residuals",
+    x = "Residual (Actual - Predicted)",
+    y = "Count"
+  ) +
+  theme_minimal()
+residuals_hist
+```
+
+```{r}
+(scatter_plot | residuals_plot) /
+  residuals_hist +
+  plot_annotation(
+    title = "Model Prediction Diagnostics",
+    theme = theme_minimal()
+  )
+
+```
+
+```{r}
+print("\nResidual statistics:")
+summary(residuals_df$Residual)
+print("\nRoot Mean Square Error (RMSE):")
+print(sqrt(mean(residuals_df$Residual^2)))
+print("\nMean Absolute Error (MAE):")
+print(mean(abs(residuals_df$Residual)))
+```
+
+- with MORE BINS
+```{r}
+actual_vs_pred <- ggplot(data.frame(
+  Actual = weather$avg_temp,
+  Predicted = exp(fitted(chosen_model))
+), aes(x = Predicted, y = Actual)) +
+  geom_point(alpha = 0.6, color = "steelblue") +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Actual vs. Predicted Temperatures",
+    x = "Predicted Temperature (°F)",
+    y = "Actual Temperature (°F)"
+  ) +
+  theme_minimal()
+
+residual_plot <- ggplot(data.frame(
+  Residuals = weather$avg_temp - exp(fitted(chosen_model))
+), aes(x = Residuals)) +
+  geom_histogram(bins = 100, fill = "steelblue", color = "white") +
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed") +
+  labs(
+    title = "Distribution of Prediction Errors",
+    x = "Residual (°F)",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+residual_analysis <- actual_vs_pred + residual_plot +
+  plot_annotation(title = "Model Prediction Performance Analysis")
+
+residual_analysis
+```
+
+
+```{r}
+weather <- weather %>%
+  mutate(coastal_category = ifelse(distance_to_coast <= 50, "Coastal", "Inland"))
+weather
+```
+
+```{r}
+weather <- weather %>%
+  mutate(
+    temp_category = cut(avg_temp, 
+                       breaks = c(-Inf, 40, 50, 60, 70, Inf),
+                       labels = c("< 40°F", "40-50°F", "50-60°F", "60-70°F", "> 70°F")),
+    coastal_category = factor(ifelse(distance_to_coast <= 50, 
+                                   "Coastal (≤ 50 miles)", 
+                                   "Inland (> 50 miles)"))
+  )
+weather
+```
+
+```{r}
+transformed_weather <- usmap_transform(weather, input_names = c("lon", "lat"))
+transformed_weather
+```
+
+
+```{r}
+transformed_data <- usmap_transform(weather, input_names = c("lon", "lat"))
+
+plot_usmap() +
+  geom_sf(data = transformed_data, aes(color = avg_temp), size = 3, alpha = 0.7) +
+  scale_color_gradient2(
+    low = "blue",
+    mid = "yellow",
+    high = "red",
+    midpoint = mean(weather$avg_temp),
+    name = "Avg. Temp (°F)"
+  ) +
+  labs(title = "Distribution of Temperature Across US Cities",
+       caption = "Data source: USA National Weather Service, 2021-2022") +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, face = "bold"))
+```
+
+
+### Prioritised Recommendations for Temperature-Based Destination Selection
+- High:Prioritise latitude, elevation and coastal proximity data collection	90% predictive power with minimal data costs
+- High:	Focus on coastal areas at lower latitudes	Consistently warmer temperatures matching client preferences
+- Medium:	Establish seasonal packages for borderline destinations	Expand destination portfolio with seasonal options
+- Medium:	Use confidence intervals rather than point estimates	More reliable decision-making for borderline cases
+- Low:	Consider geographical clusters for marketing efficiency	Marketing efficiency through regional promotions 
+
+
+```{r}
+print("Le Fin")
+```
+
+```{r}
+```

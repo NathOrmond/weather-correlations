@@ -1010,5 +1010,3 @@ save_visualisations(posterior_plots, prefix = "posterior")
   
 ```
 
-
-Let me know if you want to adjust any
